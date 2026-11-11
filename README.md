@@ -73,6 +73,15 @@ If the extension is locked, the popup strategy clicks **Unlock** and waits up to
 approve in the 1Password app (Chrome with app integration) or to type the account password in the
 browser window (Brave without app integration). Unlocking once per browser launch is enough.
 
+## Skills
+
+`skills/wallet-test/SKILL.md` is a Claude Code skill for wallet / dapp QA: it unlocks a dedicated
+**test** wallet extension (MetaMask or Rabby) from a 1Password item whose title starts with `TEST`,
+then drives a dapp through connect, sign and approve prompts on a testnet, answering the wallet's
+notification tabs as they appear. Copy the folder to `~/.claude/skills/wallet-test/` and invoke it
+with `/wallet-test "TEST MetaMask" https://your-dapp.example`. The file also describes the one-time
+test-wallet setup; keep real wallets in a profile the server never mirrors.
+
 ## Install
 
 ```bash
