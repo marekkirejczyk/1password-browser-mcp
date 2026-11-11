@@ -143,3 +143,8 @@ Diagnostics: `node dist/index.js doctor` (add `--launch` to also sync, launch an
   copy of one extension's state. Relaunching re-syncs.
 - 1Password's inline menu only appears for sites with a saved item; for everything else the
   `popup` and `cli` strategies apply.
+- Extension pages (wallet unlock screens such as Rabby or MetaMask, `chrome-extension://...`) and
+  browser UI pages have no site to match and the 1Password extension does not run inside them, so
+  use `strategy=cli` with `item=<title>`; field detection falls back to Playwright locators there
+  because such pages often block page scripts (MetaMask's LavaMoat). Password and Crypto Wallet
+  items are searched as well as Logins.

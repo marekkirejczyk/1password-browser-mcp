@@ -16,6 +16,32 @@ type Field = ElementHandle<HTMLInputElement>;
 interface LoginFields { username?: Field; password?: Field; otp?: Field }
 
 async function detectFields(page: Page): Promise<LoginFields> {
+  try {
+    return await detectFieldsInPage(page);
+  } catch (e) {
+    // Pages that lock down the main world (e.g. MetaMask's LavaMoat scuttling) reject page scripts;
+    // Playwright locators run in an isolated world and still work there.
+    log?.log(`field detection via page script failed (${(e as Error).message.split('\n')[0]}); using locators`);
+    return detectFieldsWithLocators(page);
+  }
+}
+
+let log: Logger | undefined;
+
+async function detectFieldsWithLocators(page: Page): Promise<LoginFields> {
+  const handle = async (sel: string): Promise<Field | undefined> => {
+    const loc = page.locator(sel).filter({ visible: true }).first();
+    if (!(await loc.count())) return undefined;
+    return ((await loc.elementHandle({ timeout: 1000 }).catch(() => null)) as Field | null) ?? undefined;
+  };
+  const password = await handle('input[type="password"]:not([disabled])');
+  const otp = await handle('input[autocomplete="one-time-code"]');
+  const username = (await handle('input[autocomplete="username"]:not([disabled]), input[type="email"]:not([disabled])'))
+    ?? (await handle('input[name*="user" i]:not([disabled]), input[name*="email" i]:not([disabled]), input[name*="login" i]:not([disabled]), input[id*="user" i]:not([disabled]), input[id*="email" i]:not([disabled])'));
+  return { username, password, otp };
+}
+
+async function detectFieldsInPage(page: Page): Promise<LoginFields> {
   const handle = await page.evaluateHandle(() => {
     const visible = (el: Element) => {
       const r = el.getBoundingClientRect();
@@ -50,7 +76,7 @@ async function detectFields(page: Page): Promise<LoginFields> {
 
 async function valueLength(el?: Field): Promise<number> {
   if (!el) return -1;
-  try { return await el.evaluate((e) => (e as HTMLInputElement).value.length); } catch { return -1; }
+  try { return (await el.inputValue()).length; } catch { return -1; }
 }
 
 async function filledReport(f: LoginFields): Promise<{ username: boolean; password: boolean; otp: boolean; text: string }> {
@@ -65,6 +91,7 @@ interface UiState { menu: boolean; buttonVisible: boolean; liveText: string }
 
 /** Reads the state of the UI the 1Password extension injects into the page (live regions, field button). */
 async function onePasswordUi(page: Page): Promise<UiState> {
+  if (!/^https?:/.test(page.url())) return { menu: false, buttonVisible: false, liveText: 'the 1Password extension does not run inside other extensions\' pages or browser UI pages' };
   return page.evaluate(() => {
     const live = Array.from(document.querySelectorAll('[id^="1p-"][role="status"]')).map((e) => e.textContent?.trim() ?? '').filter(Boolean).join(' | ');
     const btn = document.querySelector('com-1password-button');
@@ -133,6 +160,7 @@ async function fillViaPopup(page: Page, fields: LoginFields, mgr: BrowserManager
   const ctx = await mgr.ensure();
   const host = hostOf(page.url());
   const queries = [item, host.replace(/^www\./, ''), host.replace(/^www\./, '').split('.').slice(-2, -1)[0]].filter((q): q is string => !!q);
+  if (!queries.length) return { ok: false, detail: 'popup: this page is not a website, so there is no site to match; pass item=<title>' };
   const popup = await ctx.newPage();
   try {
     await popup.goto(`chrome-extension://${cfg.onePasswordExtensionId}/popup/index.html`, { waitUntil: 'domcontentloaded', timeout: 10000 });
@@ -177,6 +205,7 @@ async function fillViaPopup(page: Page, fields: LoginFields, mgr: BrowserManager
     }
     if (target) {
       mgr.setActive(target);
+      await popup.close().catch(() => {});
       await target.waitForLoadState('domcontentloaded').catch(() => {});
       await sleep(1500);
       const f = await detectFields(target);
@@ -184,10 +213,12 @@ async function fillViaPopup(page: Page, fields: LoginFields, mgr: BrowserManager
       const ok = r.username || r.password;
       return { ok, detail: `popup: opened "${title}" at ${target.url()} (${r.text})${ok ? '' : '; the site may use a multi-step form, call onepassword_fill again'}` };
     }
+    mgr.setActive(page);
     const { ok, after } = await waitForFill(before, fields, 4000);
     return { ok, detail: `popup: Open & Fill "${title}" -> ${ok ? 'filled current page' : 'nothing filled'} (${after.text})` };
   } finally {
     await popup.close().catch(() => {});
+    if ((await mgr.page()) === popup || (await mgr.page()).isClosed()) mgr.setActive(page);
   }
 }
 
@@ -246,7 +277,7 @@ export class OpClient {
 
   async listLogins(): Promise<OpItem[]> {
     if (this.cache && Date.now() - this.cache.time < 5 * 60 * 1000) return this.cache.items;
-    const out = await this.run(['item', 'list', '--categories', 'Login', '--format', 'json']);
+    const out = await this.run(['item', 'list', '--categories', 'Login,Password,Crypto Wallet', '--format', 'json']);
     const items = JSON.parse(out) as OpItem[];
     this.cache = { time: Date.now(), items };
     return items;
@@ -257,6 +288,11 @@ export class OpClient {
   async candidates(host: string, hint?: string): Promise<OpItem[]> {
     const items = await this.listLogins();
     const h = normHost(host);
+    if (!h) {
+      if (!hint) return [];
+      const q = hint.toLowerCase();
+      return items.filter((it) => it.id === hint || it.title.toLowerCase().includes(q) || (it.additional_information ?? '').toLowerCase().includes(q));
+    }
     const scored = items.map((it) => {
       let score = 0;
       for (const u of it.urls ?? []) {
@@ -282,7 +318,8 @@ export class OpClient {
     const byPurpose = (p: string) => fields.find((f) => f.purpose === p)?.value;
     return {
       username: byPurpose('USERNAME') ?? fields.find((f) => /user|email|login/i.test(f.label ?? '') && f.type === 'STRING')?.value,
-      password: byPurpose('PASSWORD') ?? fields.find((f) => f.type === 'CONCEALED')?.value,
+      // Password and Crypto Wallet items keep the secret in a concealed field (e.g. "password", "wallet password").
+      password: byPurpose('PASSWORD') ?? fields.find((f) => f.type === 'CONCEALED' && /password|passphrase|pin/i.test(f.label ?? ''))?.value ?? fields.find((f) => f.type === 'CONCEALED')?.value,
     };
   }
 
@@ -291,14 +328,19 @@ export class OpClient {
   }
 }
 
+/** Hostname of an http(s) URL; empty for extension and browser UI pages, which have no site to match. */
 function hostOf(url: string): string {
-  try { return new URL(url.includes('://') ? url : `https://${url}`).hostname; } catch { return ''; }
+  try {
+    const u = new URL(url.includes('://') ? url : `https://${url}`);
+    return /^https?:$/.test(u.protocol) ? u.hostname : '';
+  } catch { return ''; }
 }
 function normHost(h: string): string { return h.toLowerCase().replace(/^www\./, ''); }
 
 /* ----------------------------------- tools ---------------------------------- */
 
-export function registerOnePasswordTools(server: McpServer, mgr: BrowserManager, cfg: Config, log: Logger): void {
+export function registerOnePasswordTools(server: McpServer, mgr: BrowserManager, cfg: Config, logger: Logger): void {
+  log = logger;
   const op = new OpClient(cfg.opPath, cfg.opAccount);
 
   const fieldsFromArgs = async (page: Page, a: { usernameRef?: string; passwordRef?: string; otpRef?: string }): Promise<LoginFields> => {
@@ -325,8 +367,8 @@ export function registerOnePasswordTools(server: McpServer, mgr: BrowserManager,
     } else {
       chosen = cands[0];
     }
-    if (!chosen) throw new Error(`No 1Password Login item matches ${item ? `"${item}"` : host}. Use onepassword_items to list candidates and pass item=<id or title>.`);
-    if (cands.length > 1 && !item) log.log(`multiple 1Password items match ${host}; using "${chosen.title}" (${cands.length} candidates)`);
+    if (!chosen) throw new Error(`No 1Password Login item matches ${item ? `"${item}"` : host || 'this page (not a website: pass item=<title>)'}. Use onepassword_items to list candidates and pass item=<id or title>.`);
+    if (cands.length > 1 && !item) logger.log(`multiple 1Password items match ${host}; using "${chosen.title}" (${cands.length} candidates)`);
     const notes: string[] = [`cli: using item "${chosen.title}"${chosen.additional_information ? ` (${chosen.additional_information})` : ''} from vault ${chosen.vault?.name ?? '?'}${cands.length > 1 ? `; ${cands.length} items match this site` : ''}`];
     if (what === 'otp') {
       if (!fields.otp) throw new Error('No one-time-code field detected; pass otpRef.');
@@ -370,8 +412,8 @@ export function registerOnePasswordTools(server: McpServer, mgr: BrowserManager,
         continue;
       }
       if (!mgr.onePasswordInstalled()) { notes.push(`${s}: 1Password extension not found in this profile`); continue; }
-      const r = s === 'inline' ? await fillViaInlineMenu(page, fields, log, dry)
-        : s === 'popup' ? await fillViaPopup(page, fields, mgr, cfg, log, item, dry)
+      const r = s === 'inline' ? await fillViaInlineMenu(page, fields, logger, dry)
+        : s === 'popup' ? await fillViaPopup(page, fields, mgr, cfg, logger, item, dry)
         : await fillViaShortcut(page, fields, mgr, cfg, item, dry);
       notes.push(r.detail);
       done = r.ok;
@@ -408,7 +450,7 @@ export function registerOnePasswordTools(server: McpServer, mgr: BrowserManager,
       if (done) break;
       if (s === 'inline') {
         if (!mgr.onePasswordInstalled()) { notes.push('inline: 1Password extension not found in this profile'); continue; }
-        const r = await fillViaInlineMenu(page, fields, log, false);
+        const r = await fillViaInlineMenu(page, fields, logger, false);
         notes.push(r.detail); done = r.ok;
       } else {
         try { notes.push(await cliFill(page, fields, item, 'otp')); done = true; } catch (e) { notes.push(`cli: ${(e as Error).message}`); }
@@ -420,13 +462,13 @@ export function registerOnePasswordTools(server: McpServer, mgr: BrowserManager,
 
   server.registerTool('onepassword_items', {
     title: '1Password: list matching items',
-    description: 'List 1Password Login items matching the active tab\'s site (or a given host/query) via the 1Password CLI: title, username, vault, id. No secrets are returned.',
+    description: 'List 1Password Login, Password and Crypto Wallet items matching the active tab\'s site (or a given host/query) via the 1Password CLI: title, username, vault, id. No secrets are returned.',
     inputSchema: { host: z.string().optional(), query: z.string().optional().describe('Title/username substring'), refresh: z.boolean().optional() },
   }, guard(async ({ host, query, refresh }) => {
     if (refresh) op.invalidate();
     const h = host ?? hostOf((await mgr.page()).url());
-    const items = h ? await op.candidates(h, query) : (await op.listLogins()).filter((i) => !query || i.title.toLowerCase().includes(query.toLowerCase()));
-    if (!items.length) return text(`No 1Password Login items match ${h || query}`);
+    const items = h ? await op.candidates(h, query) : (await op.listLogins()).filter((i) => !query || i.title.toLowerCase().includes(query.toLowerCase()) || (i.additional_information ?? '').toLowerCase().includes(query.toLowerCase()));
+    if (!items.length) return text(`No 1Password Login items match ${h ? `${h}${query ? ` / "${query}"` : ''}` : `"${query ?? ''}"`}`);
     return text(items.slice(0, 25).map((i) => `${i.title}  (${i.additional_information ?? 'no username'})  vault=${i.vault?.name ?? '?'}  id=${i.id}`).join('\n'));
   }));
 

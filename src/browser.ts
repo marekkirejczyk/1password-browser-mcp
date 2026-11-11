@@ -86,7 +86,8 @@ export class BrowserManager {
     for (const p of context.pages()) this.wirePage(p);
     context.on('page', (p) => {
       this.wirePage(p);
-      this.active = p;
+      // Extension popups/notifications (wallet prompts, 1Password) also arrive here; they must not hijack the active tab.
+      if (!p.url().startsWith('chrome-extension://')) this.active = p;
       void this.ensureTabGroup();
     });
     this.browser = browser;
