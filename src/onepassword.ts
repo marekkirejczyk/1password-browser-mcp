@@ -251,12 +251,31 @@ async function fillViaShortcut(page: Page, fields: LoginFields, mgr: BrowserMana
 interface OpItem { id: string; title: string; vault?: { name?: string }; urls?: Array<{ href: string; primary?: boolean }>; additional_information?: string; account?: string }
 interface OpAccount { url: string; email?: string; account_uuid: string }
 
+class NotSignedIn extends Error {}
+
 export class OpClient {
   private cache?: { time: number; items: OpItem[] };
   constructor(private opPath: string, private account?: string) {}
 
   /** Runs `op`; `account` scopes the call (item ids are only unique within an account). */
-  run(args: string[], timeoutMs = 90000, account?: string): Promise<string> {
+  async run(args: string[], timeoutMs = 90000, account?: string): Promise<string> {
+    try {
+      return await this.exec(args, timeoutMs, account);
+    } catch (e) {
+      if (!(e instanceof NotSignedIn) || args[0] === 'signin') throw e;
+      // The app-integration session lapsed (app locked, restarted or updated). `op signin` makes the
+      // 1Password app ask for Touch ID; then the original call is retried once.
+      const acct = account ?? this.account;
+      try {
+        await this.exec(['signin'], 120000, acct);
+      } catch (se) {
+        throw new Error(`1Password CLI is not signed in and signing in through the app failed: ${(se as Error).message.split('\n')[0]}\nEnable "Integrate with 1Password CLI" in the 1Password app (Settings > Developer) and unlock it, or run "eval $(op signin)" and pass the OP_SESSION_* variable to this server's environment.`);
+      }
+      return this.exec(args, timeoutMs, account);
+    }
+  }
+
+  private exec(args: string[], timeoutMs: number, account?: string): Promise<string> {
     const acct = account ?? this.account;
     const full = [...args, ...(acct ? ['--account', acct] : [])];
     return new Promise((resolve, reject) => {
@@ -264,7 +283,7 @@ export class OpClient {
         if (err) {
           const msg = (stderr || err.message).trim();
           if (/not signed in|no account|sign in|authorization/i.test(msg)) {
-            return reject(new Error(`1Password CLI is not signed in: ${msg}\nEnable "Integrate with 1Password CLI" in the 1Password app (Settings > Developer), or run "eval $(op signin)" and pass the OP_SESSION_* variable to this server's environment.`));
+            return reject(new NotSignedIn(`1Password CLI is not signed in: ${msg}`));
           }
           if (/ENOENT/.test(msg)) return reject(new Error(`1Password CLI not found at "${this.opPath}" (brew install 1password-cli, or set BROWSER_MCP_OP_PATH).`));
           return reject(new Error(`op ${args.slice(0, 3).join(' ')} failed: ${msg}`));
