@@ -122,7 +122,7 @@ Diagnostics: `node dist/index.js doctor` (add `--launch` to also sync, launch an
 | `BROWSER_MCP_ARGS` | | extra browser flags |
 | `BROWSER_MCP_1P_SHORTCUT` | `cmd+shift+x` | popup shortcut used by `strategy=shortcut` |
 | `BROWSER_MCP_1P_EXTENSION_ID` | `aeblfdkhhhdcdjpifhhbdiojplfjncoa` | 1Password extension id |
-| `BROWSER_MCP_OP_PATH` / `BROWSER_MCP_OP_ACCOUNT` | `op` / none | 1Password CLI binary and account |
+| `BROWSER_MCP_OP_PATH` / `BROWSER_MCP_OP_ACCOUNT` | `op` / none | 1Password CLI binary; account to pin (default: every account `op account list` knows is searched, each may prompt once) |
 | `BROWSER_MCP_TAB_GROUP` | `true` | keep driven tabs in one tab group |
 | `BROWSER_MCP_TAB_GROUP_TITLE` / `BROWSER_MCP_TAB_GROUP_COLOR` | `Claude` / `purple` | group label and colour (grey, blue, red, yellow, green, pink, purple, cyan, orange) |
 | `BROWSER_MCP_SNAPSHOT_MAX_CHARS` | `20000` | snapshot truncation |

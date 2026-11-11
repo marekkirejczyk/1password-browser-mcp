@@ -248,14 +248,17 @@ async function fillViaShortcut(page: Page, fields: LoginFields, mgr: BrowserMana
 
 /* ---------------------------------- op CLI ---------------------------------- */
 
-interface OpItem { id: string; title: string; vault?: { name?: string }; urls?: Array<{ href: string; primary?: boolean }>; additional_information?: string }
+interface OpItem { id: string; title: string; vault?: { name?: string }; urls?: Array<{ href: string; primary?: boolean }>; additional_information?: string; account?: string }
+interface OpAccount { url: string; email?: string; account_uuid: string }
 
 export class OpClient {
   private cache?: { time: number; items: OpItem[] };
   constructor(private opPath: string, private account?: string) {}
 
-  run(args: string[], timeoutMs = 90000): Promise<string> {
-    const full = [...args, ...(this.account ? ['--account', this.account] : [])];
+  /** Runs `op`; `account` scopes the call (item ids are only unique within an account). */
+  run(args: string[], timeoutMs = 90000, account?: string): Promise<string> {
+    const acct = account ?? this.account;
+    const full = [...args, ...(acct ? ['--account', acct] : [])];
     return new Promise((resolve, reject) => {
       execFile(this.opPath, full, { timeout: timeoutMs, maxBuffer: 50 * 1024 * 1024, env: { ...process.env, OP_FORMAT: 'json' } }, (err, stdout, stderr) => {
         if (err) {
@@ -275,10 +278,29 @@ export class OpClient {
     try { await this.run(['--version'], 5000); return true; } catch { return false; }
   }
 
+  async accounts(): Promise<OpAccount[]> {
+    if (this.account) return [{ url: this.account, account_uuid: this.account }];
+    try {
+      const list = JSON.parse(await this.run(['account', 'list', '--format', 'json'], 15000)) as OpAccount[];
+      if (list.length) return list;
+    } catch { /* fall through: let op pick its default */ }
+    return [{ url: '', account_uuid: '' }];
+  }
+
+  /** Login, Password and Crypto Wallet items across every account the CLI knows (unless BROWSER_MCP_OP_ACCOUNT pins one). */
   async listLogins(): Promise<OpItem[]> {
     if (this.cache && Date.now() - this.cache.time < 5 * 60 * 1000) return this.cache.items;
-    const out = await this.run(['item', 'list', '--categories', 'Login,Password,Crypto Wallet', '--format', 'json']);
-    const items = JSON.parse(out) as OpItem[];
+    const items: OpItem[] = [];
+    const errors: string[] = [];
+    for (const a of await this.accounts()) {
+      try {
+        const out = await this.run(['item', 'list', '--categories', 'Login,Password,Crypto Wallet', '--format', 'json'], 90000, a.account_uuid || undefined);
+        for (const it of JSON.parse(out) as OpItem[]) items.push({ ...it, account: a.account_uuid || undefined });
+      } catch (e) {
+        errors.push(`${a.url || 'default account'}: ${(e as Error).message.split('\n')[0]}`);
+      }
+    }
+    if (!items.length && errors.length) throw new Error(errors.join('; '));
     this.cache = { time: Date.now(), items };
     return items;
   }
@@ -311,10 +333,10 @@ export class OpClient {
     return scored.map((s) => s.it);
   }
 
-  async getLogin(id: string): Promise<{ username?: string; password?: string }> {
-    const out = await this.run(['item', 'get', id, '--format', 'json', '--reveal']);
-    const item = JSON.parse(out) as { fields?: Array<{ purpose?: string; label?: string; value?: string; type?: string }> };
-    const fields = item.fields ?? [];
+  async getLogin(item: OpItem): Promise<{ username?: string; password?: string }> {
+    const out = await this.run(['item', 'get', item.id, '--format', 'json', '--reveal'], 90000, item.account);
+    const parsed = JSON.parse(out) as { fields?: Array<{ purpose?: string; label?: string; value?: string; type?: string }> };
+    const fields = parsed.fields ?? [];
     const byPurpose = (p: string) => fields.find((f) => f.purpose === p)?.value;
     return {
       username: byPurpose('USERNAME') ?? fields.find((f) => /user|email|login/i.test(f.label ?? '') && f.type === 'STRING')?.value,
@@ -323,8 +345,8 @@ export class OpClient {
     };
   }
 
-  async getOtp(id: string): Promise<string> {
-    return (await this.run(['item', 'get', id, '--otp'])).trim();
+  async getOtp(item: OpItem): Promise<string> {
+    return (await this.run(['item', 'get', item.id, '--otp'], 90000, item.account)).trim();
   }
 }
 
@@ -372,13 +394,13 @@ export function registerOnePasswordTools(server: McpServer, mgr: BrowserManager,
     const notes: string[] = [`cli: using item "${chosen.title}"${chosen.additional_information ? ` (${chosen.additional_information})` : ''} from vault ${chosen.vault?.name ?? '?'}${cands.length > 1 ? `; ${cands.length} items match this site` : ''}`];
     if (what === 'otp') {
       if (!fields.otp) throw new Error('No one-time-code field detected; pass otpRef.');
-      const code = await op.getOtp(chosen.id);
+      const code = await op.getOtp(chosen);
       if (!code) throw new Error(`Item "${chosen.title}" has no one-time password.`);
       await fields.otp.fill(code);
       notes.push('cli: filled otp');
       return notes.join('\n');
     }
-    const creds = await op.getLogin(chosen.id);
+    const creds = await op.getLogin(chosen);
     if (fields.username && creds.username) { await fields.username.fill(creds.username); notes.push('cli: filled username'); }
     if (fields.password && creds.password) { await fields.password.fill(creds.password); notes.push('cli: filled password'); }
     if (!fields.username && !fields.password) throw new Error('No username/password field detected on this page; pass usernameRef/passwordRef.');
@@ -469,7 +491,7 @@ export function registerOnePasswordTools(server: McpServer, mgr: BrowserManager,
     const h = host ?? hostOf((await mgr.page()).url());
     const items = h ? await op.candidates(h, query) : (await op.listLogins()).filter((i) => !query || i.title.toLowerCase().includes(query.toLowerCase()) || (i.additional_information ?? '').toLowerCase().includes(query.toLowerCase()));
     if (!items.length) return text(`No 1Password Login items match ${h ? `${h}${query ? ` / "${query}"` : ''}` : `"${query ?? ''}"`}`);
-    return text(items.slice(0, 25).map((i) => `${i.title}  (${i.additional_information ?? 'no username'})  vault=${i.vault?.name ?? '?'}  id=${i.id}`).join('\n'));
+    return text(items.slice(0, 25).map((i) => `${i.title}  (${i.additional_information ?? 'no username'})  vault=${i.vault?.name ?? '?'}  id=${i.id}${i.account ? `  account=${i.account}` : ''}`).join('\n'));
   }));
 
   server.registerTool('onepassword_status', {
@@ -483,8 +505,12 @@ export function registerOnePasswordTools(server: McpServer, mgr: BrowserManager,
     const avail = await op.available();
     lines.push(`cli (${cfg.opPath}): ${avail ? 'installed' : 'not found'}`);
     if (avail) {
-      try { await op.run(['whoami'], 60000); lines.push('cli sign-in: ok'); }
-      catch (e) { lines.push(`cli sign-in: ${(e as Error).message}`); }
+      try {
+        const accts = await op.accounts();
+        const ok: string[] = [];
+        for (const a of accts) { try { await op.run(['whoami'], 60000, a.account_uuid || undefined); ok.push(a.url || 'default'); } catch (e) { lines.push(`cli account ${a.url}: ${(e as Error).message.split('\n')[0]}`); } }
+        lines.push(`cli accounts searched: ${ok.join(', ') || 'none'}`);
+      } catch (e) { lines.push(`cli sign-in: ${(e as Error).message}`); }
     }
     if (mgr.onePasswordInstalled()) {
       try {
