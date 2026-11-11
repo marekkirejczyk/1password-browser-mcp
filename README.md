@@ -32,9 +32,17 @@ client sessions. `browser_close` with `kill=true` quits it.
 The mirrored instance is launched in the background (`open -g -n`) and, because Chromium activates
 itself when its first window appears, the server hands focus back to whatever app you were using.
 Every page the tools open afterwards is a **tab in that one window**; nothing raises the window
-unless you ask for it (`browser_tabs select focus=true`). Tab-group highlighting, as the Claude in
-Chrome extension does, needs the `chrome.tabGroups` extension API and is not reachable over the
-DevTools protocol, so the mirrored window itself is the "group".
+unless you ask for it (`browser_tabs select focus=true`).
+
+All driven tabs are kept in one **highlighted tab group** (default title "Claude", colour purple;
+`BROWSER_MCP_TAB_GROUP_TITLE`, `BROWSER_MCP_TAB_GROUP_COLOR`, or `BROWSER_MCP_TAB_GROUP=false`).
+The DevTools protocol has no tab-group API, so the server evaluates `chrome.tabGroups` calls inside
+an extension service worker. It uses any installed extension that declares the `tabGroups`
+permission (Claude in Chrome, ChatGPT, ...) or the bundled `extension/` helper. The helper is passed
+with `--load-extension`, which current Chrome and Brave ignore; if no suitable extension is in your
+profile, load the helper once in your daily browser (`chrome://extensions`, Developer mode, Load
+unpacked, pick `extension/`) and the mirror inherits it. `browser_status` reports which extension
+does the grouping.
 
 In `auto` mode the server picks a browser that is **not running right now** (with Brave open it
 drives Chrome, and vice versa). A second instance of your daily browser works too
@@ -115,6 +123,8 @@ Diagnostics: `node dist/index.js doctor` (add `--launch` to also sync, launch an
 | `BROWSER_MCP_1P_SHORTCUT` | `cmd+shift+x` | popup shortcut used by `strategy=shortcut` |
 | `BROWSER_MCP_1P_EXTENSION_ID` | `aeblfdkhhhdcdjpifhhbdiojplfjncoa` | 1Password extension id |
 | `BROWSER_MCP_OP_PATH` / `BROWSER_MCP_OP_ACCOUNT` | `op` / none | 1Password CLI binary and account |
+| `BROWSER_MCP_TAB_GROUP` | `true` | keep driven tabs in one tab group |
+| `BROWSER_MCP_TAB_GROUP_TITLE` / `BROWSER_MCP_TAB_GROUP_COLOR` | `Claude` / `purple` | group label and colour (grey, blue, red, yellow, green, pink, purple, cyan, orange) |
 | `BROWSER_MCP_SNAPSHOT_MAX_CHARS` | `20000` | snapshot truncation |
 | `BROWSER_MCP_SNAPSHOT_AFTER_ACTIONS` | `false` | return a snapshot after click/type/etc. by default |
 | `BROWSER_MCP_ACTION_TIMEOUT_MS` | `15000` | Playwright action timeout |

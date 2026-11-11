@@ -1,7 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn, execFile, type ChildProcess } from 'node:child_process';
-import { chromium, type Browser, type BrowserContext, type Page, type Dialog } from 'playwright-core';
+import { fileURLToPath } from 'node:url';
+import { chromium, type Browser, type BrowserContext, type Page, type Dialog, type Worker } from 'playwright-core';
 import type { Config } from './config.js';
 import type { Logger } from './log.js';
 import { resolveBrowser, syncProfile, hasExtension, type BrowserInfo, type SyncResult } from './profile.js';
@@ -11,6 +12,8 @@ export interface ConsoleEntry { time: number; type: string; text: string; locati
 export interface NetworkEntry { time: number; method: string; url: string; resourceType: string; status?: number; failure?: string }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const HELPER_EXTENSION_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'extension');
+const TAB_GROUP_COLORS = ['grey', 'blue', 'red', 'yellow', 'green', 'pink', 'purple', 'cyan', 'orange'];
 
 export class BrowserManager {
   private browser?: Browser;
@@ -84,9 +87,11 @@ export class BrowserManager {
     context.on('page', (p) => {
       this.wirePage(p);
       this.active = p;
+      void this.ensureTabGroup();
     });
     this.browser = browser;
     this.context = context;
+    void this.ensureTabGroup();
     this.info.browser = this.info.browser ?? this.safeResolve();
     this.info.pid = this.info.pid ?? (await this.listeningPid());
   }
@@ -132,6 +137,8 @@ export class BrowserManager {
       '--disable-background-timer-throttling',
       '--disable-renderer-backgrounding',
       ...(this.cfg.disableSync ? ['--disable-sync'] : []),
+      // Branded Chrome >= 137 ignores --load-extension; Brave/Chromium/Edge honour it. Harmless when ignored.
+      ...(this.cfg.tabGroup && fs.existsSync(HELPER_EXTENSION_DIR) ? [`--load-extension=${HELPER_EXTENSION_DIR}`] : []),
       ...(this.cfg.headless ? ['--headless=new'] : []),
       ...this.cfg.extraArgs,
       'about:blank',
@@ -273,7 +280,68 @@ export class BrowserManager {
     const page = await ctx.newPage();
     this.active = page;
     if (url) await page.goto(url, { waitUntil: 'domcontentloaded' });
+    await this.ensureTabGroup();
     return page;
+  }
+
+  /* ------------------------------- tab group ------------------------------ */
+
+  tabGroupStatus: string = 'not attempted';
+  private groupWorker?: Worker;
+
+  /** Finds an extension service worker whose manifest grants tabGroups: our helper first, any other as fallback. */
+  private async findGroupWorker(): Promise<Worker | undefined> {
+    if (this.groupWorker) {
+      try { await this.groupWorker.evaluate(() => 1); return this.groupWorker; } catch { this.groupWorker = undefined; }
+    }
+    const ctx = this.context;
+    if (!ctx) return undefined;
+    const candidates: Array<{ worker: Worker; name: string; helper: boolean }> = [];
+    for (const w of ctx.serviceWorkers()) {
+      if (!w.url().startsWith('chrome-extension://')) continue;
+      try {
+        const m = await w.evaluate(() => {
+          const c = (globalThis as unknown as { chrome?: { runtime?: { getManifest(): { name: string; permissions?: string[] } } } }).chrome;
+          const man = c?.runtime?.getManifest();
+          return man ? { name: man.name, perms: man.permissions ?? [] } : null;
+        });
+        if (m && m.perms.includes('tabGroups') && m.perms.includes('tabs')) candidates.push({ worker: w, name: m.name, helper: m.name.includes('browser-mcp') });
+      } catch { /* worker gone */ }
+    }
+    candidates.sort((a, b) => Number(b.helper) - Number(a.helper));
+    const pick = candidates[0];
+    if (pick) { this.groupWorker = pick.worker; this.tabGroupStatus = `via ${pick.helper ? 'helper extension' : `"${pick.name}" extension`}`; }
+    else this.tabGroupStatus = 'no extension with the tabGroups permission is loaded (helper ignored by this browser?)';
+    return pick?.worker;
+  }
+
+  /** Puts every ordinary tab of the driven instance into one titled, coloured tab group. */
+  async ensureTabGroup(): Promise<void> {
+    if (!this.cfg.tabGroup || !this.context) return;
+    const color = TAB_GROUP_COLORS.includes(this.cfg.tabGroupColor) ? this.cfg.tabGroupColor : 'purple';
+    try {
+      // Service workers of freshly started extensions may not be registered with Playwright yet.
+      let worker = await this.findGroupWorker();
+      for (let i = 0; i < 10 && !worker; i++) { await sleep(300); worker = await this.findGroupWorker(); }
+      if (!worker) return;
+      await worker.evaluate(async ({ title, color }) => {
+        const c = (globalThis as unknown as { chrome: any }).chrome;
+        const tabs: Array<{ id: number; url?: string; pendingUrl?: string; groupId: number; windowId: number }> = await c.tabs.query({});
+        const ours = tabs.filter((t) => !(t.url ?? t.pendingUrl ?? '').startsWith('chrome-extension://') && !(t.url ?? '').startsWith('devtools://'));
+        const groups: Array<{ id: number; title?: string; windowId: number }> = await c.tabGroups.query({ title });
+        const byWindow = new Map<number, number[]>();
+        for (const t of ours) { if (t.groupId === -1 || !groups.some((g) => g.id === t.groupId)) byWindow.set(t.windowId, [...(byWindow.get(t.windowId) ?? []), t.id]); }
+        for (const [windowId, tabIds] of byWindow) {
+          const existing = groups.find((g) => g.windowId === windowId);
+          const groupId: number = await c.tabs.group(existing ? { tabIds, groupId: existing.id } : { tabIds, createProperties: { windowId } });
+          await c.tabGroups.update(groupId, { title, color });
+        }
+        for (const g of groups) await c.tabGroups.update(g.id, { title, color }).catch(() => {});
+      }, { title: this.cfg.tabGroupTitle, color });
+    } catch (e) {
+      this.tabGroupStatus = `failed: ${(e as Error).message.split('\n')[0]}`;
+      this.log.log('tab group', this.tabGroupStatus);
+    }
   }
 
   async close(killBrowser: boolean): Promise<string> {

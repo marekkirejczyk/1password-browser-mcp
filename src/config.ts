@@ -33,6 +33,10 @@ export interface Config {
   onePasswordExtensionId: string;
   opAccount?: string;
   opPath: string;
+  /** Keep all driven tabs in one highlighted tab group (needs an extension with the tabGroups permission). */
+  tabGroup: boolean;
+  tabGroupTitle: string;
+  tabGroupColor: string;
   snapshotMaxChars: number;
   snapshotAfterActions: boolean;
   actionTimeoutMs: number;
@@ -77,6 +81,9 @@ export function loadConfig(argv: string[] = process.argv.slice(2)): Config {
     onePasswordExtensionId: env('1P_EXTENSION_ID') ?? 'aeblfdkhhhdcdjpifhhbdiojplfjncoa',
     opAccount: env('OP_ACCOUNT'),
     opPath: env('OP_PATH') ?? 'op',
+    tabGroup: bool(env('TAB_GROUP'), true),
+    tabGroupTitle: env('TAB_GROUP_TITLE') ?? 'Claude',
+    tabGroupColor: env('TAB_GROUP_COLOR') ?? 'purple',
     snapshotMaxChars: Number(env('SNAPSHOT_MAX_CHARS') ?? 20000),
     snapshotAfterActions: bool(env('SNAPSHOT_AFTER_ACTIONS'), false),
     actionTimeoutMs: Number(env('ACTION_TIMEOUT_MS') ?? 15000),

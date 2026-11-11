@@ -72,6 +72,7 @@ export function registerBrowserTools(server: McpServer, mgr: BrowserManager, cfg
     lines.push(`cdp: ${cfg.cdpUrl} (${mgr.isConnected() ? 'connected' : 'not connected'}, launched by this server: ${mgr.info.launched}, pid: ${mgr.info.pid ?? '?'})`);
     if (mgr.info.lastSync) lines.push(`last profile sync: ${mgr.info.lastSync.files} files, ${(mgr.info.lastSync.bytes / 1e6).toFixed(1)} MB, ${mgr.info.lastSync.durationMs} ms, skipped large IndexedDB origins: ${mgr.info.lastSync.skippedIndexedDb.length}`);
     lines.push(`1Password extension in profile: ${mgr.onePasswordInstalled() ? 'yes' : 'no'}; popup shortcut: ${cfg.onePasswordShortcut}`);
+    lines.push(`tab group: ${cfg.tabGroup ? `"${cfg.tabGroupTitle}" (${cfg.tabGroupColor}) ${mgr.tabGroupStatus}` : 'disabled'}`);
     if (mgr.isConnected()) {
       const pages = mgr.pages();
       const active = await mgr.page();
@@ -94,6 +95,7 @@ export function registerBrowserTools(server: McpServer, mgr: BrowserManager, cfg
     const u = /^[a-z][a-z0-9+.-]*:/i.test(url) ? url : `https://${url}`;
     const page = newTab ? await mgr.newPage() : await mgr.page();
     await page.goto(u, { waitUntil: waitUntil ?? 'load', timeout: 45000 });
+    void mgr.ensureTabGroup();
     if (snap ?? true) return text(await snapshot(page, cfg.snapshotMaxChars));
     return text(`Navigated to ${page.url()}\nTitle: ${await page.title()}`);
   }));
