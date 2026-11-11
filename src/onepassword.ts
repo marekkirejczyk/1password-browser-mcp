@@ -345,9 +345,9 @@ export function registerOnePasswordTools(server: McpServer, mgr: BrowserManager,
 
   server.registerTool('onepassword_fill', {
     title: '1Password: fill login',
-    description: 'Fill the login form on the active tab from 1Password. Strategies: inline (extension inline menu on the focused field), popup (extension popup page: search item, Open & Fill), cli (1Password CLI types the values server-side), shortcut (macOS keystrokes, needs Accessibility). auto = inline, popup, cli. Credential values are never returned. For multi-step forms (username first) call it again on the next step.',
+    description: 'Fill the login form on the active tab from 1Password. Strategies: cli (1Password CLI reads the item, the server types the values; fully programmatic), inline (extension inline menu on the focused field), popup (extension popup page: search item, Open & Fill), shortcut (macOS keystrokes, needs Accessibility). auto = cli, inline, popup. Credential values are never returned. For multi-step forms (username first) call it again on the next step.',
     inputSchema: {
-      strategy: z.enum(['auto', 'extension', 'inline', 'popup', 'cli', 'shortcut']).optional().describe('auto = inline -> popup -> cli; extension = inline -> popup'),
+      strategy: z.enum(['auto', 'extension', 'inline', 'popup', 'cli', 'shortcut']).optional().describe('auto = cli -> inline -> popup; extension = inline -> popup'),
       item: z.string().optional().describe('1Password item title/id to prefer when several match the site'),
       submit: z.boolean().optional().describe('Press Enter in the last filled field afterwards'),
       dryRun: z.boolean().optional().describe('Stop right before the fill step and report what would happen'),
@@ -358,7 +358,7 @@ export function registerOnePasswordTools(server: McpServer, mgr: BrowserManager,
     const fields = await fieldsFromArgs(page, { usernameRef, passwordRef, otpRef });
     const notes: string[] = [describeFields(fields)];
     const strat = strategy ?? 'auto';
-    const order: Array<'inline' | 'popup' | 'cli' | 'shortcut'> = strat === 'auto' ? ['inline', 'popup', 'cli'] : strat === 'extension' ? ['inline', 'popup'] : [strat];
+    const order: Array<'inline' | 'popup' | 'cli' | 'shortcut'> = strat === 'auto' ? ['cli', 'inline', 'popup'] : strat === 'extension' ? ['inline', 'popup'] : [strat];
     const dry = dryRun ?? false;
     let done = false;
     for (const s of order) {
@@ -389,7 +389,7 @@ export function registerOnePasswordTools(server: McpServer, mgr: BrowserManager,
 
   server.registerTool('onepassword_otp', {
     title: '1Password: fill one-time code',
-    description: 'Fill a TOTP / one-time code field from the matching 1Password item (extension inline menu first, then CLI). The code is never returned to the caller.',
+    description: 'Fill a TOTP / one-time code field from the matching 1Password item (CLI first, then extension inline menu). The code is never returned to the caller.',
     inputSchema: {
       strategy: z.enum(['auto', 'inline', 'cli']).optional(),
       item: z.string().optional().describe('1Password item id or title (CLI)'),
@@ -402,7 +402,7 @@ export function registerOnePasswordTools(server: McpServer, mgr: BrowserManager,
     const otp = otpRef ? ((await resolve(page, { ref: otpRef }).elementHandle()) as Field | null) ?? undefined : auto.otp;
     const fields: LoginFields = { otp };
     const notes: string[] = [`otp field: ${otp ? 'detected' : 'not found'}`];
-    const order: Array<'inline' | 'cli'> = (strategy ?? 'auto') === 'auto' ? ['inline', 'cli'] : [strategy as 'inline' | 'cli'];
+    const order: Array<'inline' | 'cli'> = (strategy ?? 'auto') === 'auto' ? ['cli', 'inline'] : [strategy as 'inline' | 'cli'];
     let done = false;
     for (const s of order) {
       if (done) break;

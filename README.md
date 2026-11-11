@@ -60,12 +60,12 @@ profile dir (works only on browsers that still allow it, and only when that brow
 
 | strategy | mechanism | needs |
 |---|---|---|
+| `cli` | `op item get` reads the item and the server types the values into the detected fields; fully programmatic, no extension UI | `op` installed and signed in (enable *Settings > Developer > Integrate with 1Password CLI* in the app, or export `OP_SESSION_*`) |
 | `inline` | focuses the login field, waits for the extension's inline menu, picks the first suggestion with ArrowDown + Enter | extension unlocked, a saved Login for the site, inline menu enabled |
 | `popup` | opens the extension popup page in a tab, searches the site or `item`, clicks **Open & Fill** (1Password opens the item's URL and fills it) | extension unlocked |
-| `cli` | `op item get` and types the values into the detected fields (server-side only) | `op` installed and signed in (enable *Settings > Developer > Integrate with 1Password CLI* in the app, or export `OP_SESSION_*`) |
 | `shortcut` | sends Cmd+Shift+X then Enter through macOS System Events | Accessibility permission for the app that runs this server |
 
-`auto` = inline, popup, cli. Values are never returned to the caller; results only say which
+`auto` = cli, inline, popup. Values are never returned to the caller; results only say which
 fields are filled. `onepassword_otp` fills one-time codes (inline or CLI), `onepassword_items`
 lists matching items (CLI), `onepassword_status` reports what is available.
 
