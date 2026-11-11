@@ -7,7 +7,9 @@ and without the warnings or refusals other browser MCPs add around sign-in. On t
 the usual browsing tools for an MCP client (Claude Code, Claude Desktop, Cursor, ...): navigate,
 snapshot with element refs, click, type, screenshots, console, network, tabs, dialogs, uploads, JS eval.
 
-macOS first (Linux launch paths exist but are untested). Requires Node 20+.
+Runs on macOS and Linux (Chrome, Chromium, Brave, Edge; headless or with a display). Requires Node 20+.
+On Linux the 1Password `cli`, `inline` and `popup` strategies work; only the macOS-specific
+`shortcut` strategy and the focus hand-back are unavailable. See [Linux](#linux) for details.
 
 ## How it works
 
@@ -21,18 +23,20 @@ does not touch your running browser. Instead, in the default **mirror** mode it:
 3. connects over CDP with `playwright-core`.
 
 Caches, service-worker caches and huge IndexedDB origins are skipped. Chromium encrypts cookies with
-a key in the macOS Keychain that is shared by binary, so the copied sessions decrypt and work. Sync
-is disabled in the mirrored instance so nothing it does is pushed back to your account.
+a key in the macOS Keychain (on Linux: the GNOME Keyring / KWallet entry, or a fixed key when no
+keyring is in use) that is shared by binary, so the copied sessions decrypt and work. Sync is
+disabled in the mirrored instance so nothing it does is pushed back to your account.
 
 The browser outlives the server: a restarted server simply re-attaches, so logins persist across
 client sessions. `browser_close` with `kill=true` quits it.
 
 ### Windows and focus
 
-The mirrored instance is launched in the background (`open -g -n`) and, because Chromium activates
-itself when its first window appears, the server hands focus back to whatever app you were using.
-Every page the tools open afterwards is a **tab in that one window**; nothing raises the window
-unless you ask for it (`browser_tabs select focus=true`).
+On macOS the mirrored instance is launched in the background (`open -g -n`) and, because Chromium
+activates itself when its first window appears, the server hands focus back to whatever app you were
+using. On Linux the binary is spawned directly and the window manager decides where the new window
+goes. Every page the tools open afterwards is a **tab in that one window**; nothing raises the
+window unless you ask for it (`browser_tabs select focus=true`).
 
 All driven tabs are kept in one **highlighted tab group** (default title "Claude", colour purple;
 `BROWSER_MCP_TAB_GROUP_TITLE`, `BROWSER_MCP_TAB_GROUP_COLOR`, or `BROWSER_MCP_TAB_GROUP=false`).
@@ -45,10 +49,10 @@ unpacked, pick `extension/`) and the mirror inherits it. `browser_status` report
 does the grouping.
 
 In `auto` mode the server picks a browser that is **not running right now** (with Brave open it
-drives Chrome, and vice versa). A second instance of your daily browser works too
-(`BROWSER_MCP_BROWSER=brave`), but it shares the bundle id with the one you are using, and macOS
-then routes links clicked in other apps to whichever instance it last registered, which is often
-the mirrored one.
+drives Chrome, and vice versa; "running" is read from the profile's `SingletonLock`). A second
+instance of your daily browser works too (`BROWSER_MCP_BROWSER=brave`), but on macOS it shares the
+bundle id with the one you are using, and macOS then routes links clicked in other apps to whichever
+instance it last registered, which is often the mirrored one.
 
 Other modes: `attach` connects to any browser you started yourself with
 `--remote-debugging-port=9333 --user-data-dir=<non-default dir>`; `direct` launches on the real
@@ -63,7 +67,7 @@ profile dir (works only on browsers that still allow it, and only when that brow
 | `cli` | `op item get` reads the item and the server types the values into the detected fields; fully programmatic, no extension UI | `op` installed and signed in (enable *Settings > Developer > Integrate with 1Password CLI* in the app, or export `OP_SESSION_*`) |
 | `inline` | focuses the login field, waits for the extension's inline menu, picks the first suggestion with ArrowDown + Enter | extension unlocked, a saved Login for the site, inline menu enabled |
 | `popup` | opens the extension popup page in a tab, searches the site or `item`, clicks **Open & Fill** (1Password opens the item's URL and fills it) | extension unlocked |
-| `shortcut` | sends Cmd+Shift+X then Enter through macOS System Events | Accessibility permission for the app that runs this server |
+| `shortcut` | sends Cmd+Shift+X then Enter through macOS System Events | macOS only; Accessibility permission for the app that runs this server |
 
 `auto` = cli, inline, popup. Values are never returned to the caller; results only say which
 fields are filled. `onepassword_otp` fills one-time codes (inline or CLI), `onepassword_items`
@@ -101,6 +105,37 @@ Claude Desktop / any JSON config:
 ```
 
 Diagnostics: `node dist/index.js doctor` (add `--launch` to also sync, launch and connect).
+End-to-end check of every tool against a live server: `BROWSER_MCP_HEADLESS=true node scripts/smoke.mjs`
+(needs network access to example.com and the-internet.herokuapp.com; `--keep` leaves the browser running).
+
+## Linux
+
+Tested on Linux with Google Chrome (headless, and headful under `xvfb-run`). What differs from macOS:
+
+- **Detection.** Binaries are looked up on `PATH` (`google-chrome`, `google-chrome-stable`,
+  `chromium`, `chromium-browser`, `brave-browser`, `brave`, `microsoft-edge`, ...). Profiles are read
+  from `$XDG_CONFIG_HOME` (default `~/.config`): `google-chrome`, `chromium`,
+  `BraveSoftware/Brave-Browser`, `microsoft-edge`; Snap (`~/snap/chromium/common/chromium`) and
+  Flatpak (`~/.var/app/<id>/config/...`) locations are used when they exist. Override with
+  `BROWSER_MCP_EXECUTABLE` / `BROWSER_MCP_USER_DATA_DIR`.
+- **No display.** Without `DISPLAY` or `WAYLAND_DISPLAY` the launch fails fast with a clear message;
+  set `BROWSER_MCP_HEADLESS=true` (`--headless=new`, extensions still load) or run the server under
+  `xvfb-run`. 1Password's extension UI needs a window, so for logins use a real or virtual display.
+- **Root / containers.** Chromium refuses to start as root and its sandbox usually cannot be set up
+  in containers, so the server adds `--no-sandbox` when it runs as root or detects a container
+  (`/.dockerenv`, `/run/.containerenv`, cgroup names), plus `--disable-dev-shm-usage` in containers.
+  Passing `--no-sandbox` yourself in `BROWSER_MCP_ARGS` is still fine (it is not duplicated).
+- **Pid lookup** for a browser the server re-attaches to uses `lsof`, then `/proc/net/tcp`, then
+  `ss`, so none of them has to be installed.
+- **1Password.** `cli`, `inline` and `popup` work as on macOS. `shortcut` reports "only supported on
+  macOS" (it drives System Events). The default popup shortcut shown in status is `ctrl+shift+x`.
+- **Cookie encryption.** Chrome/Brave on Linux pick the password store from the desktop session
+  (`gnome-libsecret`, `kwallet`, or `basic`). The mirrored instance inherits the server's environment;
+  if it is started from a context without `DBUS_SESSION_BUS_ADDRESS` it may fall back to `basic` and
+  fail to decrypt the copied cookies. Pass `BROWSER_MCP_ARGS=--password-store=gnome-libsecret`
+  (or `kwallet5`) to match your daily browser.
+- **Snap Chromium** cannot read hidden directories in your home, including `~/.browser-mcp`. Point
+  `BROWSER_MCP_MIRROR_DIR` at a visible folder (e.g. `~/browser-mcp-profiles`) or use a non-Snap build.
 
 ## Configuration (environment or `--key=value`)
 
@@ -119,8 +154,8 @@ Diagnostics: `node dist/index.js doctor` (add `--launch` to also sync, launch an
 | `BROWSER_MCP_MIRROR_HISTORY` | `true` | copy History too |
 | `BROWSER_MCP_DISABLE_SYNC` | `true` | pass `--disable-sync` to the mirrored instance |
 | `BROWSER_MCP_HEADLESS` | `false` | `--headless=new` (1Password UI needs a window; keep off for logins) |
-| `BROWSER_MCP_ARGS` | | extra browser flags |
-| `BROWSER_MCP_1P_SHORTCUT` | `cmd+shift+x` | popup shortcut used by `strategy=shortcut` |
+| `BROWSER_MCP_ARGS` | | extra browser flags (on Linux `--no-sandbox` is added automatically as root / in containers) |
+| `BROWSER_MCP_1P_SHORTCUT` | `cmd+shift+x` (macOS) / `ctrl+shift+x` | popup shortcut used by `strategy=shortcut` (macOS only) |
 | `BROWSER_MCP_1P_EXTENSION_ID` | `aeblfdkhhhdcdjpifhhbdiojplfjncoa` | 1Password extension id |
 | `BROWSER_MCP_OP_PATH` / `BROWSER_MCP_OP_ACCOUNT` | `op` / none | 1Password CLI binary and account |
 | `BROWSER_MCP_TAB_GROUP` | `true` | keep driven tabs in one tab group |
@@ -132,8 +167,8 @@ Diagnostics: `node dist/index.js doctor` (add `--launch` to also sync, launch an
 
 ## Caveats
 
-- When the mirrored instance is the same app as your daily browser, macOS may route links opened
-  from other apps to it. Prefer the other browser (the `auto` default) or quit the mirror with
+- On macOS, when the mirrored instance is the same app as your daily browser, the system may route
+  links opened from other apps to it. Prefer the other browser (the `auto` default) or quit the mirror with
   `browser_close kill=true` when done.
 - The mirror is a point-in-time copy. Logins you perform in your regular browser after the last
   sync are picked up on the next launch of the mirrored instance (`MIRROR_SYNC=always`).

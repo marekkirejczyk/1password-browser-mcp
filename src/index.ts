@@ -7,7 +7,8 @@ import { Logger } from './log.js';
 import { BrowserManager } from './browser.js';
 import { registerBrowserTools } from './tools.js';
 import { registerOnePasswordTools, OpClient } from './onepassword.js';
-import { resolveBrowser, listProfiles, hasExtension } from './profile.js';
+import { resolveBrowser, listProfiles, hasExtension, isBrowserRunning } from './profile.js';
+import { isLinux, isRoot, inContainer, hasDisplay, needsNoSandbox } from './platform.js';
 
 const require = createRequire(import.meta.url);
 const { version } = require('../package.json') as { version: string };
@@ -28,6 +29,7 @@ async function doctor(launch: boolean): Promise<void> {
     out(`browser: ${b.name}\n  executable: ${b.executable}\n  user data dir: ${b.userDataDir}`);
     out(`  profiles: ${listProfiles(b.userDataDir).join(', ') || 'none found'} (using "${cfg.profileDir}")`);
     out(`  1Password extension in source profile: ${hasExtension(b.userDataDir, cfg.profileDir, cfg.onePasswordExtensionId) ? 'yes' : 'no'}`);
+    out(`  running right now (user's own instance): ${isBrowserRunning(b.executable, b.userDataDir) ? 'yes' : 'no'}`);
   } catch (e) {
     out(`browser: ${(e as Error).message}`);
   }
@@ -39,6 +41,11 @@ async function doctor(launch: boolean): Promise<void> {
   if (process.platform === 'darwin') {
     try { const { frontmostProcessName } = await import('./mac.js'); out(`accessibility: ok (frontmost app: ${await frontmostProcessName()})`); }
     catch (e) { out(`accessibility: ${(e as Error).message}`); }
+  }
+  if (isLinux) {
+    const display = process.env.WAYLAND_DISPLAY ? `wayland ${process.env.WAYLAND_DISPLAY}` : process.env.DISPLAY ? `x11 ${process.env.DISPLAY}` : 'none';
+    out(`display: ${display}${cfg.headless ? ' (headless mode, not needed)' : hasDisplay() ? '' : ' - set BROWSER_MCP_HEADLESS=true or use xvfb-run'}`);
+    out(`sandbox: ${needsNoSandbox() ? `--no-sandbox will be added (${isRoot() ? 'running as root' : 'container detected'})` : 'default'}${inContainer() ? '; container: --disable-dev-shm-usage will be added' : ''}`);
   }
   if (launch) {
     out('launching/attaching...');

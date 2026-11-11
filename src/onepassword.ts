@@ -232,7 +232,10 @@ export class OpClient {
           if (/not signed in|no account|sign in|authorization/i.test(msg)) {
             return reject(new Error(`1Password CLI is not signed in: ${msg}\nEnable "Integrate with 1Password CLI" in the 1Password app (Settings > Developer), or run "eval $(op signin)" and pass the OP_SESSION_* variable to this server's environment.`));
           }
-          if (/ENOENT/.test(msg)) return reject(new Error(`1Password CLI not found at "${this.opPath}" (brew install 1password-cli, or set BROWSER_MCP_OP_PATH).`));
+          if (/ENOENT/.test(msg)) {
+            const hint = process.platform === 'darwin' ? 'brew install 1password-cli' : 'install it from https://developer.1password.com/docs/cli/get-started/';
+            return reject(new Error(`1Password CLI not found at "${this.opPath}" (${hint}, or set BROWSER_MCP_OP_PATH).`));
+          }
           return reject(new Error(`op ${args.slice(0, 3).join(' ')} failed: ${msg}`));
         }
         resolve(stdout);
@@ -369,6 +372,7 @@ export function registerOnePasswordTools(server: McpServer, mgr: BrowserManager,
         catch (e) { notes.push(`cli: ${(e as Error).message}`); }
         continue;
       }
+      if (s === 'shortcut' && process.platform !== 'darwin') { notes.push('shortcut: only supported on macOS (uses System Events); use cli, inline or popup'); continue; }
       if (!mgr.onePasswordInstalled()) { notes.push(`${s}: 1Password extension not found in this profile`); continue; }
       const r = s === 'inline' ? await fillViaInlineMenu(page, fields, log, dry)
         : s === 'popup' ? await fillViaPopup(page, fields, mgr, cfg, log, item, dry)
@@ -437,7 +441,9 @@ export function registerOnePasswordTools(server: McpServer, mgr: BrowserManager,
   }, guard(async () => {
     const lines: string[] = [];
     lines.push(`extension (${cfg.onePasswordExtensionId}) in profile: ${mgr.onePasswordInstalled() ? 'yes' : 'no'}`);
-    lines.push(`popup shortcut used by strategy=shortcut: ${cfg.onePasswordShortcut} (verify at chrome://extensions/shortcuts; override with BROWSER_MCP_1P_SHORTCUT)`);
+    lines.push(process.platform === 'darwin'
+      ? `popup shortcut used by strategy=shortcut: ${cfg.onePasswordShortcut} (verify at chrome://extensions/shortcuts; override with BROWSER_MCP_1P_SHORTCUT)`
+      : `strategy=shortcut: macOS only (not available on ${process.platform}); cli, inline and popup work here`);
     const avail = await op.available();
     lines.push(`cli (${cfg.opPath}): ${avail ? 'installed' : 'not found'}`);
     if (avail) {
