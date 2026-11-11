@@ -1,0 +1,134 @@
+# browser-mcp
+
+macOS first (Linux launch paths exist but are untested). Requires Node 20+.
+
+An MCP server that drives **your own Chrome or Brave profile**: the same cookies, sessions,
+and extensions you use every day, including the 1Password extension. It gives an MCP client
+(Claude Code, Claude Desktop, Cursor, ...) the usual browsing tools (navigate, snapshot with
+element refs, click, type, screenshots, console, network, tabs, dialogs, uploads, JS eval) plus
+tools that sign in to sites through 1Password without the credential ever reaching the model.
+
+## How it works
+
+Chromium 136+ refuses `--remote-debugging-port` on the default profile directory, so the server
+does not touch your running browser. Instead, in the default **mirror** mode it:
+
+1. copies the identity-bearing parts of your profile (cookies, local/session storage,
+   IndexedDB under a size cap, extensions and their state, saved logins, preferences) into
+   `~/.browser-mcp/profiles/<browser>/` (first run ~10 s for a 2 GB profile, incremental after),
+2. launches a second instance of the real browser binary on that copy with the DevTools port open,
+3. connects over CDP with `playwright-core`.
+
+Caches, service-worker caches and huge IndexedDB origins are skipped. Chromium encrypts cookies with
+a key in the macOS Keychain that is shared by binary, so the copied sessions decrypt and work. Sync
+is disabled in the mirrored instance so nothing it does is pushed back to your account.
+
+The browser outlives the server: a restarted server simply re-attaches, so logins persist across
+client sessions. `browser_close` with `kill=true` quits it.
+
+### Windows and focus
+
+The mirrored instance is launched in the background (`open -g -n`) and, because Chromium activates
+itself when its first window appears, the server hands focus back to whatever app you were using.
+Every page the tools open afterwards is a **tab in that one window**; nothing raises the window
+unless you ask for it (`browser_tabs select focus=true`). Tab-group highlighting, as the Claude in
+Chrome extension does, needs the `chrome.tabGroups` extension API and is not reachable over the
+DevTools protocol, so the mirrored window itself is the "group".
+
+In `auto` mode the server picks a browser that is **not running right now** (with Brave open it
+drives Chrome, and vice versa). A second instance of your daily browser works too
+(`BROWSER_MCP_BROWSER=brave`), but it shares the bundle id with the one you are using, and macOS
+then routes links clicked in other apps to whichever instance it last registered, which is often
+the mirrored one.
+
+Other modes: `attach` connects to any browser you started yourself with
+`--remote-debugging-port=9333 --user-data-dir=<non-default dir>`; `direct` launches on the real
+profile dir (works only on browsers that still allow it, and only when that browser is not running).
+
+## 1Password
+
+`onepassword_fill` tries, in order (configurable with `strategy`):
+
+| strategy | mechanism | needs |
+|---|---|---|
+| `inline` | focuses the login field, waits for the extension's inline menu, picks the first suggestion with ArrowDown + Enter | extension unlocked, a saved Login for the site, inline menu enabled |
+| `popup` | opens the extension popup page in a tab, searches the site or `item`, clicks **Open & Fill** (1Password opens the item's URL and fills it) | extension unlocked |
+| `cli` | `op item get` and types the values into the detected fields (server-side only) | `op` installed and signed in (enable *Settings > Developer > Integrate with 1Password CLI* in the app, or export `OP_SESSION_*`) |
+| `shortcut` | sends Cmd+Shift+X then Enter through macOS System Events | Accessibility permission for the app that runs this server |
+
+`auto` = inline, popup, cli. Values are never returned to the caller; results only say which
+fields are filled. `onepassword_otp` fills one-time codes (inline or CLI), `onepassword_items`
+lists matching items (CLI), `onepassword_status` reports what is available.
+
+If the extension is locked, the popup strategy clicks **Unlock** and waits up to 30 s for you to
+approve in the 1Password app (Chrome with app integration) or to type the account password in the
+browser window (Brave without app integration). Unlocking once per browser launch is enough.
+
+## Install
+
+```bash
+git clone https://github.com/marekkirejczyk/browser-mcp.git
+cd browser-mcp && npm install && npm run build
+```
+
+Claude Code:
+
+```bash
+claude mcp add --scope user browser -e BROWSER_MCP_BROWSER=chrome -- node /absolute/path/to/browser-mcp/dist/index.js
+```
+
+Claude Desktop / any JSON config:
+
+```json
+{
+  "mcpServers": {
+    "browser": {
+      "command": "node",
+      "args": ["/absolute/path/to/browser-mcp/dist/index.js"],
+      "env": { "BROWSER_MCP_BROWSER": "chrome" }
+    }
+  }
+}
+```
+
+Diagnostics: `node dist/index.js doctor` (add `--launch` to also sync, launch and connect).
+
+## Configuration (environment or `--key=value`)
+
+| variable | default | meaning |
+|---|---|---|
+| `BROWSER_MCP_BROWSER` | `auto` | `brave`, `chrome`, `chromium`, `edge`; auto prefers an installed browser with a profile that is not currently running |
+| `BROWSER_MCP_EXECUTABLE` | detected | browser binary |
+| `BROWSER_MCP_USER_DATA_DIR` | browser default | source profile root |
+| `BROWSER_MCP_PROFILE` | `Default` | profile folder (`Profile 1`, ...) |
+| `BROWSER_MCP_MODE` | `mirror` | `mirror`, `direct`, `attach` |
+| `BROWSER_MCP_PORT` | `9333` | DevTools port |
+| `BROWSER_MCP_CDP_URL` | `http://127.0.0.1:<port>` | endpoint to attach to |
+| `BROWSER_MCP_MIRROR_DIR` | `~/.browser-mcp/profiles` | where mirrored profiles live |
+| `BROWSER_MCP_MIRROR_SYNC` | `always` | `always` (every launch), `once`, `never` |
+| `BROWSER_MCP_MIRROR_INDEXEDDB_MAX_MB` | `100` | skip IndexedDB origins larger than this (extensions always copied) |
+| `BROWSER_MCP_MIRROR_HISTORY` | `true` | copy History too |
+| `BROWSER_MCP_DISABLE_SYNC` | `true` | pass `--disable-sync` to the mirrored instance |
+| `BROWSER_MCP_HEADLESS` | `false` | `--headless=new` (1Password UI needs a window; keep off for logins) |
+| `BROWSER_MCP_ARGS` | | extra browser flags |
+| `BROWSER_MCP_1P_SHORTCUT` | `cmd+shift+x` | popup shortcut used by `strategy=shortcut` |
+| `BROWSER_MCP_1P_EXTENSION_ID` | `aeblfdkhhhdcdjpifhhbdiojplfjncoa` | 1Password extension id |
+| `BROWSER_MCP_OP_PATH` / `BROWSER_MCP_OP_ACCOUNT` | `op` / none | 1Password CLI binary and account |
+| `BROWSER_MCP_SNAPSHOT_MAX_CHARS` | `20000` | snapshot truncation |
+| `BROWSER_MCP_SNAPSHOT_AFTER_ACTIONS` | `false` | return a snapshot after click/type/etc. by default |
+| `BROWSER_MCP_ACTION_TIMEOUT_MS` | `15000` | Playwright action timeout |
+| `BROWSER_MCP_LOG_FILE` | `~/.browser-mcp/browser-mcp.log` | server log; browser stderr goes to `browser-mcp.browser.log` |
+
+## Caveats
+
+- When the mirrored instance is the same app as your daily browser, macOS may route links opened
+  from other apps to it. Prefer the other browser (the `auto` default) or quit the mirror with
+  `browser_close kill=true` when done.
+- The mirror is a point-in-time copy. Logins you perform in your regular browser after the last
+  sync are picked up on the next launch of the mirrored instance (`MIRROR_SYNC=always`).
+- The copied profile contains your session cookies and extension state; it sits in
+  `~/.browser-mcp` with mode 0700. Delete that folder to purge it.
+- Copying LevelDB stores while the source browser runs can occasionally produce an inconsistent
+  copy of one extension's state. Relaunching re-syncs.
+- 1Password's inline menu only appears for sites with a saved item; for everything else the
+  `popup` and `cli` strategies apply.
