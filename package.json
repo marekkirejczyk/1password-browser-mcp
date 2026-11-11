@@ -1,7 +1,7 @@
 {
-  "name": "browser-mcp",
+  "name": "1password-browser-mcp",
   "version": "0.1.0",
-  "description": "MCP server driving Chrome/Brave on your real profile (extensions, sessions, 1Password)",
+  "description": "Browser MCP server that signs in with 1Password: drives your real Chrome/Brave profile and fills logins via the 1Password extension or CLI",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -21,7 +21,7 @@
   "license": "MIT",
   "type": "module",
   "bin": {
-    "browser-mcp": "dist/index.js"
+    "1password-browser-mcp": "dist/index.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",
@@ -34,7 +34,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/marekkirejczyk/browser-mcp.git"
+    "url": "https://github.com/marekkirejczyk/1password-browser-mcp.git"
   },
   "engines": {
     "node": ">=20"

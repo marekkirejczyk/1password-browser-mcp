@@ -1,12 +1,13 @@
-# browser-mcp
+# 1password-browser-mcp
+
+**A browser MCP server that signs in with 1Password.** It drives your own Chrome or Brave profile
+(cookies, sessions, extensions, including the 1Password extension you already have installed) and
+fills logins and one-time codes through 1Password without the credential ever reaching the model,
+and without the warnings or refusals other browser MCPs add around sign-in. On top of that it offers
+the usual browsing tools for an MCP client (Claude Code, Claude Desktop, Cursor, ...): navigate,
+snapshot with element refs, click, type, screenshots, console, network, tabs, dialogs, uploads, JS eval.
 
 macOS first (Linux launch paths exist but are untested). Requires Node 20+.
-
-An MCP server that drives **your own Chrome or Brave profile**: the same cookies, sessions,
-and extensions you use every day, including the 1Password extension. It gives an MCP client
-(Claude Code, Claude Desktop, Cursor, ...) the usual browsing tools (navigate, snapshot with
-element refs, click, type, screenshots, console, network, tabs, dialogs, uploads, JS eval) plus
-tools that sign in to sites through 1Password without the credential ever reaching the model.
 
 ## How it works
 
@@ -67,14 +68,14 @@ browser window (Brave without app integration). Unlocking once per browser launc
 ## Install
 
 ```bash
-git clone https://github.com/marekkirejczyk/browser-mcp.git
-cd browser-mcp && npm install && npm run build
+git clone https://github.com/marekkirejczyk/1password-browser-mcp.git
+cd 1password-browser-mcp && npm install && npm run build
 ```
 
 Claude Code:
 
 ```bash
-claude mcp add --scope user browser -e BROWSER_MCP_BROWSER=chrome -- node /absolute/path/to/browser-mcp/dist/index.js
+claude mcp add --scope user browser -e BROWSER_MCP_BROWSER=chrome -- node /absolute/path/to/1password-browser-mcp/dist/index.js
 ```
 
 Claude Desktop / any JSON config:
@@ -84,7 +85,7 @@ Claude Desktop / any JSON config:
   "mcpServers": {
     "browser": {
       "command": "node",
-      "args": ["/absolute/path/to/browser-mcp/dist/index.js"],
+      "args": ["/absolute/path/to/1password-browser-mcp/dist/index.js"],
       "env": { "BROWSER_MCP_BROWSER": "chrome" }
     }
   }

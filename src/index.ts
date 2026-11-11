@@ -21,7 +21,7 @@ process.on('unhandledRejection', (e) => log.log('unhandledRejection', (e as Erro
 
 async function doctor(launch: boolean): Promise<void> {
   const out = (s: string) => process.stdout.write(s + '\n');
-  out(`browser-mcp ${version} doctor`);
+  out(`1password-browser-mcp ${version} doctor`);
   out(`mode: ${cfg.mode}`);
   try {
     const b = resolveBrowser(cfg.browser, cfg.executable, cfg.userDataDir);
@@ -57,7 +57,7 @@ async function main(): Promise<void> {
     await doctor(argv.includes('--launch'));
     process.exit(0);
   }
-  const server = new McpServer({ name: 'browser-mcp', version }, {
+  const server = new McpServer({ name: '1password-browser-mcp', version }, {
     instructions: [
       'Drives the user\'s own Chrome/Brave profile (cookies, sessions, extensions) through the DevTools protocol.',
       'Workflow: browser_navigate or browser_snapshot to get element refs like e12, then browser_click / browser_type / browser_fill_form with ref.',
@@ -68,7 +68,7 @@ async function main(): Promise<void> {
   registerBrowserTools(server, mgr, cfg);
   registerOnePasswordTools(server, mgr, cfg, log);
   await server.connect(new StdioServerTransport());
-  log.log(`browser-mcp ${version} started (mode=${cfg.mode}, browser=${cfg.browser}, cdp=${cfg.cdpUrl})`);
+  log.log(`1password-browser-mcp ${version} started (mode=${cfg.mode}, browser=${cfg.browser}, cdp=${cfg.cdpUrl})`);
 }
 
 main().catch((e) => {
