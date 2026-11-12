@@ -77,6 +77,15 @@ If the extension is locked, the popup strategy clicks **Unlock** and waits up to
 approve in the 1Password app (Chrome with app integration) or to type the account password in the
 browser window (Brave without app integration). Unlocking once per browser launch is enough.
 
+## Skills
+
+`skills/wallet-test/SKILL.md` is a Claude Code skill for wallet / dapp QA: it unlocks a dedicated
+**test** wallet extension (MetaMask or Rabby) from a 1Password item whose title starts with `TEST`,
+then drives a dapp through connect, sign and approve prompts on a testnet, answering the wallet's
+notification tabs as they appear. Copy the folder to `~/.claude/skills/wallet-test/` and invoke it
+with `/wallet-test "TEST MetaMask" https://your-dapp.example`. The file also describes the one-time
+test-wallet setup; keep real wallets in a profile the server never mirrors.
+
 ## Install
 
 ```bash
@@ -157,7 +166,7 @@ Tested on Linux with Google Chrome (headless, and headful under `xvfb-run`). Wha
 | `BROWSER_MCP_ARGS` | | extra browser flags (on Linux `--no-sandbox` is added automatically as root / in containers) |
 | `BROWSER_MCP_1P_SHORTCUT` | `cmd+shift+x` (macOS) / `ctrl+shift+x` | popup shortcut used by `strategy=shortcut` (macOS only) |
 | `BROWSER_MCP_1P_EXTENSION_ID` | `aeblfdkhhhdcdjpifhhbdiojplfjncoa` | 1Password extension id |
-| `BROWSER_MCP_OP_PATH` / `BROWSER_MCP_OP_ACCOUNT` | `op` / none | 1Password CLI binary and account |
+| `BROWSER_MCP_OP_PATH` / `BROWSER_MCP_OP_ACCOUNT` | `op` / none | 1Password CLI binary; account to pin (default: every account `op account list` knows is searched, each may prompt once) |
 | `BROWSER_MCP_TAB_GROUP` | `true` | keep driven tabs in one tab group |
 | `BROWSER_MCP_TAB_GROUP_TITLE` / `BROWSER_MCP_TAB_GROUP_COLOR` | `Claude` / `purple` | group label and colour (grey, blue, red, yellow, green, pink, purple, cyan, orange) |
 | `BROWSER_MCP_SNAPSHOT_MAX_CHARS` | `20000` | snapshot truncation |
@@ -178,3 +187,8 @@ Tested on Linux with Google Chrome (headless, and headful under `xvfb-run`). Wha
   copy of one extension's state. Relaunching re-syncs.
 - 1Password's inline menu only appears for sites with a saved item; for everything else the
   `popup` and `cli` strategies apply.
+- Extension pages (wallet unlock screens such as Rabby or MetaMask, `chrome-extension://...`) and
+  browser UI pages have no site to match and the 1Password extension does not run inside them, so
+  use `strategy=cli` with `item=<title>`; field detection falls back to Playwright locators there
+  because such pages often block page scripts (MetaMask's LavaMoat). Password and Crypto Wallet
+  items are searched as well as Logins.

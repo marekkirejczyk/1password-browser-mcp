@@ -62,7 +62,11 @@ export class BrowserManager {
       this.log.log(`attaching to existing browser at ${this.cfg.cdpUrl}`);
       if (!this.info.userDataDirInUse) {
         // Most likely a browser this server launched earlier (it outlives the server on purpose).
-        const info = this.safeResolve();
+        // Identify it from the listening process rather than from the configured preference.
+        const found = await this.resolveFromListeningProcess();
+        const info = found?.info ?? this.safeResolve();
+        this.info.browser = info;
+        if (found?.userDataDir) this.info.userDataDirInUse = found.userDataDir;
         if (this.cfg.mode === 'mirror' && info && fs.existsSync(path.join(this.cfg.mirrorDir, info.kind, this.cfg.profileDir))) {
           this.info.userDataDirInUse = path.join(this.cfg.mirrorDir, info.kind);
         } else if (this.cfg.mode === 'direct' && info) {
@@ -87,7 +91,8 @@ export class BrowserManager {
     for (const p of context.pages()) this.wirePage(p);
     context.on('page', (p) => {
       this.wirePage(p);
-      this.active = p;
+      // Extension popups/notifications (wallet prompts, 1Password) also arrive here; they must not hijack the active tab.
+      if (!p.url().startsWith('chrome-extension://')) this.active = p;
       void this.ensureTabGroup();
     });
     this.browser = browser;
@@ -95,6 +100,20 @@ export class BrowserManager {
     void this.ensureTabGroup();
     this.info.browser = this.info.browser ?? this.safeResolve();
     this.info.pid = this.info.pid ?? (await this.listeningPid());
+  }
+
+  /** Identifies the browser listening on the CDP port from its command line (binary path and --user-data-dir). */
+  private async resolveFromListeningProcess(): Promise<{ info: BrowserInfo; userDataDir?: string } | undefined> {
+    const pid = await this.listeningPid();
+    if (!pid) return undefined;
+    const cmd = await new Promise<string>((resolve) => execFile('ps', ['-o', 'command=', '-p', String(pid)], { timeout: 5000 }, (err, out) => resolve(err ? '' : out.trim())));
+    if (!cmd) return undefined;
+    const exe = cmd.split(/ --/)[0].trim();
+    const userDataDir = /--user-data-dir=("[^"]*"|\S+)/.exec(cmd)?.[1]?.replace(/^"|"$/g, '');
+    const kind = (['brave', 'chrome', 'chromium', 'edge'] as const).find((k) => { try { return resolveBrowser(k).executable === exe; } catch { return false; } });
+    if (!kind) return undefined;
+    this.info.pid = pid;
+    return { info: resolveBrowser(kind, undefined, this.cfg.userDataDir), userDataDir };
   }
 
   private safeResolve(): BrowserInfo | undefined {
