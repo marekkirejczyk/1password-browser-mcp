@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import type { BrowserKind } from './config.js';
+import { pidAlive } from './platform.js';
 
 export interface BrowserInfo {
   kind: BrowserKind;
@@ -21,11 +22,16 @@ const MAC: Record<BrowserKind, { name: string; app: string; bin: string; data: s
   edge: { name: 'Microsoft Edge', app: 'Microsoft Edge.app', bin: 'Contents/MacOS/Microsoft Edge', data: 'Library/Application Support/Microsoft Edge', bundle: 'com.microsoft.edgemac' },
 };
 
-const LINUX: Record<BrowserKind, { name: string; bins: string[]; data: string }> = {
-  brave: { name: 'Brave Browser', bins: ['brave-browser', 'brave'], data: '.config/BraveSoftware/Brave-Browser' },
-  chrome: { name: 'Google Chrome', bins: ['google-chrome', 'google-chrome-stable'], data: '.config/google-chrome' },
-  chromium: { name: 'Chromium', bins: ['chromium', 'chromium-browser'], data: '.config/chromium' },
-  edge: { name: 'Microsoft Edge', bins: ['microsoft-edge', 'microsoft-edge-stable'], data: '.config/microsoft-edge' },
+/**
+ * Linux: binary names looked up on PATH and candidate user-data-dirs (relative to $XDG_CONFIG_HOME,
+ * default ~/.config). Snap and Flatpak installs keep the profile elsewhere; the first existing dir wins
+ * and the native location is the default when none exists yet.
+ */
+const LINUX: Record<BrowserKind, { name: string; bins: string[]; data: string; altData: string[] }> = {
+  brave: { name: 'Brave Browser', bins: ['brave-browser', 'brave-browser-stable', 'brave'], data: 'BraveSoftware/Brave-Browser', altData: ['.var/app/com.brave.Browser/config/BraveSoftware/Brave-Browser', 'snap/brave/current/.config/BraveSoftware/Brave-Browser'] },
+  chrome: { name: 'Google Chrome', bins: ['google-chrome', 'google-chrome-stable'], data: 'google-chrome', altData: ['.var/app/com.google.Chrome/config/google-chrome'] },
+  chromium: { name: 'Chromium', bins: ['chromium', 'chromium-browser'], data: 'chromium', altData: ['snap/chromium/common/chromium', '.var/app/org.chromium.Chromium/config/chromium'] },
+  edge: { name: 'Microsoft Edge', bins: ['microsoft-edge', 'microsoft-edge-stable'], data: 'microsoft-edge', altData: ['.var/app/com.microsoft.Edge/config/microsoft-edge'] },
 };
 
 function which(bin: string): string | undefined {
@@ -49,19 +55,36 @@ function candidate(kind: BrowserKind): BrowserInfo | undefined {
   const l = LINUX[kind];
   for (const b of l.bins) {
     const exe = which(b);
-    if (exe) return { kind, name: l.name, executable: exe, userDataDir: path.join(home, l.data) };
+    if (!exe) continue;
+    const configHome = process.env.XDG_CONFIG_HOME || path.join(home, '.config');
+    const native = path.join(configHome, l.data);
+    const dirs = [native, ...l.altData.map((d) => path.join(home, d))];
+    return { kind, name: l.name, executable: exe, userDataDir: dirs.find((d) => fs.existsSync(d)) ?? native };
   }
   return undefined;
 }
 
-/** True when a process of this browser binary is running on its own (not one of ours on a mirrored profile). */
-export function isBrowserRunning(executable: string): boolean {
+/**
+ * True when the user's own instance of this browser is running: its user-data-dir holds a live
+ * SingletonLock (a `hostname-pid` symlink Chromium keeps while it runs), or a process of the binary
+ * exists that is not one of ours on a mirrored profile. The lock check also covers Linux installs
+ * where the PATH entry is a shell wrapper (google-chrome, snap) and the real process has another name.
+ */
+export function isBrowserRunning(executable: string, userDataDir?: string): boolean {
+  if (userDataDir) {
+    try {
+      const target = fs.readlinkSync(path.join(userDataDir, 'SingletonLock'));
+      const pid = Number(/-(\d+)$/.exec(target)?.[1]);
+      if (pid > 0 && pidAlive(pid)) return true;
+    } catch { /* no lock: not running, or not readable */ }
+  }
   try {
-    const out = execFileSync('pgrep', ['-f', executable], { encoding: 'utf8', timeout: 3000 });
+    const out = execFileSync('pgrep', ['-f', executable], { encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] });
     const pids = out.split('\n').filter(Boolean);
     for (const pid of pids) {
+      if (Number(pid) === process.pid) continue;
       let cmd = '';
-      try { cmd = execFileSync('ps', ['-o', 'command=', '-p', pid], { encoding: 'utf8', timeout: 3000 }); } catch { continue; }
+      try { cmd = execFileSync('ps', ['-o', 'command=', '-p', pid], { encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] }); } catch { continue; }
       if (cmd.includes('--type=')) continue; // helper process
       if (cmd.includes('.browser-mcp')) continue; // our own mirrored instance
       return true;
@@ -77,7 +100,7 @@ export function resolveBrowser(kind: BrowserKind | 'auto', executable?: string, 
   // running right now: a second instance of the user's daily browser shares its bundle id, so macOS
   // may route links clicked in other apps to the mirrored instance.
   const withProfile = found.filter((c) => fs.existsSync(c.userDataDir));
-  const info = (kind === 'auto' ? withProfile.find((c) => !isBrowserRunning(c.executable)) : undefined) ?? withProfile[0] ?? found[0];
+  const info = (kind === 'auto' ? withProfile.find((c) => !isBrowserRunning(c.executable, c.userDataDir)) : undefined) ?? withProfile[0] ?? found[0];
   if (!info && !executable) {
     throw new Error(`No supported browser found (looked for ${kinds.join(', ')}). Set BROWSER_MCP_EXECUTABLE.`);
   }

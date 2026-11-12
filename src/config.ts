@@ -28,7 +28,7 @@ export interface Config {
   headless: boolean;
   disableSync: boolean;
   extraArgs: string[];
-  /** Shortcut that opens the 1Password extension popup (its "_execute_action" command, see chrome://extensions/shortcuts). */
+  /** Shortcut that opens the 1Password extension popup (its "_execute_action" command, see chrome://extensions/shortcuts). Only used by strategy=shortcut (macOS). */
   onePasswordShortcut: string;
   onePasswordExtensionId: string;
   opAccount?: string;
@@ -77,7 +77,7 @@ export function loadConfig(argv: string[] = process.argv.slice(2)): Config {
     headless: bool(env('HEADLESS'), false),
     disableSync: bool(env('DISABLE_SYNC'), true),
     extraArgs: (env('ARGS') ?? '').split(/\s+/).filter(Boolean),
-    onePasswordShortcut: env('1P_SHORTCUT') ?? 'cmd+shift+x',
+    onePasswordShortcut: env('1P_SHORTCUT') ?? (process.platform === 'darwin' ? 'cmd+shift+x' : 'ctrl+shift+x'),
     onePasswordExtensionId: env('1P_EXTENSION_ID') ?? 'aeblfdkhhhdcdjpifhhbdiojplfjncoa',
     opAccount: env('OP_ACCOUNT'),
     opPath: env('OP_PATH') ?? 'op',

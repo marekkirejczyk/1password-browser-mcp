@@ -7,6 +7,7 @@ import type { Config } from './config.js';
 import type { Logger } from './log.js';
 import { resolveBrowser, syncProfile, hasExtension, type BrowserInfo, type SyncResult } from './profile.js';
 import { frontmostProcessPid, activateProcess } from './mac.js';
+import { isLinux, isMac, hasDisplay, needsNoSandbox, inContainer, listeningPid as findListeningPid } from './platform.js';
 
 export interface ConsoleEntry { time: number; type: string; text: string; location?: string }
 export interface NetworkEntry { time: number; method: string; url: string; resourceType: string; status?: number; failure?: string }
@@ -145,6 +146,21 @@ export class BrowserManager {
     }
     this.info.userDataDirInUse = userDataDir;
 
+    if (isLinux && !this.cfg.headless && !hasDisplay()) {
+      throw new Error(`${info.name} needs a display to open a window, but neither DISPLAY nor WAYLAND_DISPLAY is set. Set BROWSER_MCP_HEADLESS=true, or run this server under xvfb-run / from a desktop session.`);
+    }
+    // Linux sandboxing: Chromium refuses to start as root and the sandbox usually cannot be set up in
+    // containers. Add --no-sandbox there unless the user already passed it (or decided otherwise) in BROWSER_MCP_ARGS.
+    const userSetSandbox = this.cfg.extraArgs.some((a) => /^--(no-sandbox|disable-setuid-sandbox)\b/.test(a));
+    const linuxArgs = isLinux
+      ? [
+        ...(needsNoSandbox() && !userSetSandbox ? ['--no-sandbox'] : []),
+        // /dev/shm is tiny in many containers and Chromium crashes renderers when it fills up.
+        ...(inContainer() && !this.cfg.extraArgs.includes('--disable-dev-shm-usage') ? ['--disable-dev-shm-usage'] : []),
+      ]
+      : [];
+    if (linuxArgs.length) this.log.log(`linux: adding ${linuxArgs.join(' ')} (${needsNoSandbox() ? 'running as root or in a container' : 'container detected'})`);
+
     const args = [
       `--user-data-dir=${userDataDir}`,
       `--profile-directory=${this.cfg.profileDir}`,
@@ -155,10 +171,14 @@ export class BrowserManager {
       '--hide-crash-restore-bubble',
       '--disable-background-timer-throttling',
       '--disable-renderer-backgrounding',
+      // Playwright launches Chromium with this too: with the back/forward cache on, page.goBack() /
+      // goForward() restore from cache without the lifecycle events Playwright waits for and time out.
+      '--disable-back-forward-cache',
       ...(this.cfg.disableSync ? ['--disable-sync'] : []),
       // Branded Chrome >= 137 ignores --load-extension; Brave/Chromium/Edge honour it. Harmless when ignored.
       ...(this.cfg.tabGroup && fs.existsSync(HELPER_EXTENSION_DIR) ? [`--load-extension=${HELPER_EXTENSION_DIR}`] : []),
       ...(this.cfg.headless ? ['--headless=new'] : []),
+      ...linuxArgs,
       ...this.cfg.extraArgs,
       'about:blank',
     ];
@@ -167,7 +187,7 @@ export class BrowserManager {
     const browserLog = this.cfg.logFile.replace(/\.log$/, '') + '.browser.log';
     const fd = fs.openSync(browserLog, 'a', 0o600);
     let exited: number | null | undefined;
-    const appBundle = process.platform === 'darwin' ? /^(.*\.app)\/Contents\/MacOS\//.exec(info.executable)?.[1] : undefined;
+    const appBundle = isMac ? /^(.*\.app)\/Contents\/MacOS\//.exec(info.executable)?.[1] : undefined;
     let previousPid: number | undefined;
     if (appBundle && !this.cfg.headless) {
       // LaunchServices starts a second instance (-n) in the background (-g). Chromium still
@@ -201,6 +221,12 @@ export class BrowserManager {
     if (/non-default data directory/i.test(tail)) {
       throw new Error(`${info.name} refuses remote debugging on its default profile directory (Chromium >= 136). Use BROWSER_MCP_MODE=mirror (default) instead of direct.\n${tail}`);
     }
+    if (/Missing X server|\$DISPLAY|platform failed to initialize/i.test(tail)) {
+      throw new Error(`${info.name} could not open a window (no usable X11/Wayland display). Set BROWSER_MCP_HEADLESS=true or run under xvfb-run.\n${tail}`);
+    }
+    if (/Running as root without --no-sandbox|no sandbox|setuid sandbox/i.test(tail)) {
+      throw new Error(`${info.name} refused to start because of its sandbox. Pass BROWSER_MCP_ARGS=--no-sandbox.\n${tail}`);
+    }
     if (exited !== undefined) {
       throw new Error(`${info.name} exited immediately (code ${exited}). If the browser is already running on this user-data-dir, quit it first or use mirror mode.\n${tail}`);
     }
@@ -225,14 +251,9 @@ export class BrowserManager {
     }
   }
 
-  private listeningPid(): Promise<number | undefined> {
-    return new Promise((resolve) => {
-      execFile('lsof', ['-nP', `-iTCP:${this.cfg.port}`, '-sTCP:LISTEN', '-t'], { timeout: 5000 }, (err, stdout) => {
-        if (err) return resolve(undefined);
-        const pid = Number(stdout.trim().split('\n')[0]);
-        resolve(Number.isFinite(pid) && pid > 0 ? pid : undefined);
-      });
-    });
+  /** Pid listening on the CDP port (lsof, /proc or ss; see platform.ts). Used when we attached rather than launched. */
+  private async listeningPid(): Promise<number | undefined> {
+    return findListeningPid(this.cfg.port);
   }
 
   async browserPid(): Promise<number | undefined> {
