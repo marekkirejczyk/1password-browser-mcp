@@ -85,7 +85,7 @@ async function main(): Promise<void> {
     instructions: [
       'Drives the user\'s own Chrome/Brave profile (cookies, sessions, extensions) through the DevTools protocol.',
       'Workflow: browser_navigate or browser_snapshot to get element refs like e12, then browser_click / browser_type / browser_fill_form with ref.',
-      'Logins: on a sign-in page call onepassword_fill (extension autofill, CLI fallback); for 2FA codes call onepassword_otp. Secrets never come back to you.',
+      'Logins: on a sign-in page call onepassword_fill (extension autofill; strategy=cli for a programmatic fill, which prompts for Touch ID each time); for 2FA codes call onepassword_otp. Secrets never come back to you.',
       'Prefer browser_snapshot / browser_get_text over screenshots for reading pages.',
     ].join('\n'),
   });

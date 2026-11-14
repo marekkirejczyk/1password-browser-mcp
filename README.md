@@ -79,17 +79,19 @@ A registry in `~/.browser-mcp/sessions/` numbers live sessions; `browser_status`
 
 ## 1Password
 
-`onepassword_fill` tries, in order (configurable with `strategy`):
+`onepassword_fill` strategies (pick one with `strategy`; `auto` tries `inline` then `popup`):
 
 | strategy | mechanism | needs |
 |---|---|---|
-| `cli` | `op item get` reads the item and the server types the values into the detected fields; fully programmatic, no extension UI | `op` installed and signed in (enable *Settings > Developer > Integrate with 1Password CLI* in the app, or export `OP_SESSION_*`) |
+| `cli` | `op item get` reads the item and the server types the values into the detected fields; fully programmatic, no extension UI, but the 1Password app asks for Touch ID (or the account password) on every call, so it is never chosen automatically | `op` installed and signed in (enable *Settings > Developer > Integrate with 1Password CLI* in the app, or export `OP_SESSION_*`) |
 | `inline` | focuses the login field, waits for the extension's inline menu, picks the first suggestion with ArrowDown + Enter | extension unlocked, a saved Login for the site, inline menu enabled |
 | `popup` | opens the extension popup page in a tab, searches the site or `item`, clicks **Open & Fill** (1Password opens the item's URL and fills it) | extension unlocked |
 | `shortcut` | sends Cmd+Shift+X then Enter through macOS System Events | macOS only; Accessibility permission for the app that runs this server |
 
-`auto` = cli, inline, popup. Values are never returned to the caller; results only say which
-fields are filled. `onepassword_otp` fills one-time codes (inline or CLI), `onepassword_items`
+`auto` = inline, popup. Use `strategy=cli` explicitly when the extension cannot fill (wallet and
+other extension pages, sites without a saved item). Values are never returned to the caller;
+results only say which fields are filled. `onepassword_otp` fills one-time codes (inline, or CLI
+when asked), `onepassword_items`
 lists matching items (CLI), `onepassword_status` reports what is available.
 
 If the extension is locked, the popup strategy clicks **Unlock** and waits up to 30 s for you to
