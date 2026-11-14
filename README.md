@@ -58,6 +58,25 @@ Other modes: `attach` connects to any browser you started yourself with
 `--remote-debugging-port=9333 --user-data-dir=<non-default dir>`; `direct` launches on the real
 profile dir (works only on browsers that still allow it, and only when that browser is not running).
 
+## Several agents at once
+
+Every MCP client starts its own server process; this is how they share or split the browser:
+
+- **shared** (default): all servers attach to one browser instance. Each session owns only the tabs
+  it opened: `browser_tabs` lists and indexes just those, `browser_snapshot` and friends act on the
+  session's active tab, and the session's tabs live in their own tab group ("Claude", "Claude 2", ...
+  or `BROWSER_MCP_SESSION_NAME`, each with its own colour). `browser_tabs all=true` shows every tab
+  in the browser, and selecting one of another session's tabs adopts it. When a server exits its tabs
+  are closed (`BROWSER_MCP_KEEP_TABS=true` keeps them). A launch lock makes sure servers starting at
+  the same moment bring up a single browser.
+- **isolated** (`BROWSER_MCP_SESSIONS=isolated`): each server launches its own browser on its own
+  profile copy (`~/.browser-mcp/profiles/<browser>-<session>`) and its own port (first free one above
+  `BROWSER_MCP_PORT`). Cookies and extensions are the same, but tabs, windows and extension state are
+  separate, so agents cannot see or disturb each other. On exit the browser is quit and the copy
+  removed unless `BROWSER_MCP_ISOLATED_KEEP=true`.
+
+A registry in `~/.browser-mcp/sessions/` numbers live sessions; `browser_status` lists the others.
+
 ## 1Password
 
 `onepassword_fill` tries, in order (configurable with `strategy`):
@@ -114,6 +133,7 @@ Claude Desktop / any JSON config:
 ```
 
 Diagnostics: `node dist/index.js doctor` (add `--launch` to also sync, launch and connect).
+Manual tool calls: `node scripts/mcp-client.mjs '[["browser_status",{}],["browser_navigate",{"url":"https://example.com"}]]'`.
 End-to-end check of every tool against a live server: `BROWSER_MCP_HEADLESS=true node scripts/smoke.mjs`
 (needs network access to example.com and the-internet.herokuapp.com; `--keep` leaves the browser running).
 
@@ -167,8 +187,12 @@ Tested on Linux with Google Chrome (headless, and headful under `xvfb-run`). Wha
 | `BROWSER_MCP_1P_SHORTCUT` | `cmd+shift+x` (macOS) / `ctrl+shift+x` | popup shortcut used by `strategy=shortcut` (macOS only) |
 | `BROWSER_MCP_1P_EXTENSION_ID` | `aeblfdkhhhdcdjpifhhbdiojplfjncoa` | 1Password extension id |
 | `BROWSER_MCP_OP_PATH` / `BROWSER_MCP_OP_ACCOUNT` | `op` / none | 1Password CLI binary; account to pin (default: every account `op account list` knows is searched, each may prompt once) |
-| `BROWSER_MCP_TAB_GROUP` | `true` | keep driven tabs in one tab group |
-| `BROWSER_MCP_TAB_GROUP_TITLE` / `BROWSER_MCP_TAB_GROUP_COLOR` | `Claude` / `purple` | group label and colour (grey, blue, red, yellow, green, pink, purple, cyan, orange) |
+| `BROWSER_MCP_SESSIONS` | `shared` | `shared` (one browser, per-session tabs) or `isolated` (one browser per server) |
+| `BROWSER_MCP_SESSION_NAME` | number from the registry | label used in the tab-group title and the isolated profile copy |
+| `BROWSER_MCP_KEEP_TABS` | `false` | shared: leave this session's tabs open when the server exits |
+| `BROWSER_MCP_ISOLATED_KEEP` | `false` | isolated: keep the browser and profile copy after the server exits |
+| `BROWSER_MCP_TAB_GROUP` | `true` | keep this session's tabs in one tab group |
+| `BROWSER_MCP_TAB_GROUP_TITLE` / `BROWSER_MCP_TAB_GROUP_COLOR` | `Claude` / one colour per session | group label and colour (grey, blue, red, yellow, green, pink, purple, cyan, orange) |
 | `BROWSER_MCP_SNAPSHOT_MAX_CHARS` | `20000` | snapshot truncation |
 | `BROWSER_MCP_SNAPSHOT_AFTER_ACTIONS` | `false` | return a snapshot after click/type/etc. by default |
 | `BROWSER_MCP_ACTION_TIMEOUT_MS` | `15000` | Playwright action timeout |

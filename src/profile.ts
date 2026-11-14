@@ -190,7 +190,8 @@ class Syncer {
       if (d.size === s.size && Math.abs(d.mtimeMs - s.mtimeMs) < 1) return; // unchanged
     } catch { /* missing */ }
     fs.mkdirSync(path.dirname(dst), { recursive: true, mode: 0o700 });
-    fs.copyFileSync(src, dst);
+    // Copy-on-write clone where the file system supports it (APFS, btrfs, xfs): instant and space-free.
+    fs.copyFileSync(src, dst, fs.constants.COPYFILE_FICLONE);
     try { fs.utimesSync(dst, s.atime, s.mtime); } catch { /* ignore */ }
     this.files++;
     this.bytes += s.size;

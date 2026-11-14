@@ -65,6 +65,8 @@ export function registerBrowserTools(server: McpServer, mgr: BrowserManager, cfg
     const lines: string[] = [];
     if (connect ?? true) await mgr.ensure();
     const b = mgr.info.browser;
+    const others = mgr.registry.list().filter((r) => r.n !== mgr.session.n);
+    lines.push(`session: #${mgr.session.n}${cfg.sessionName ? ` "${cfg.sessionName}"` : ''} (${cfg.sessions}); other live sessions: ${others.length ? others.map((r) => `#${r.n}${r.name ? ` "${r.name}"` : ''} ${r.mode}${r.port ? ` port ${r.port}` : ''}`).join(', ') : 'none'}`);
     lines.push(`mode: ${cfg.mode}`);
     lines.push(`browser: ${b ? `${b.name} (${b.executable})` : 'unresolved'}`);
     lines.push(`source profile: ${b?.userDataDir ?? '?'} / ${cfg.profileDir}`);
@@ -72,11 +74,13 @@ export function registerBrowserTools(server: McpServer, mgr: BrowserManager, cfg
     lines.push(`cdp: ${cfg.cdpUrl} (${mgr.isConnected() ? 'connected' : 'not connected'}, launched by this server: ${mgr.info.launched}, pid: ${mgr.info.pid ?? '?'})`);
     if (mgr.info.lastSync) lines.push(`last profile sync: ${mgr.info.lastSync.files} files, ${(mgr.info.lastSync.bytes / 1e6).toFixed(1)} MB, ${mgr.info.lastSync.durationMs} ms, skipped large IndexedDB origins: ${mgr.info.lastSync.skippedIndexedDb.length}`);
     lines.push(`1Password extension in profile: ${mgr.onePasswordInstalled() ? 'yes' : 'no'}; popup shortcut: ${cfg.onePasswordShortcut}`);
-    lines.push(`tab group: ${cfg.tabGroup ? `"${cfg.tabGroupTitle}" (${cfg.tabGroupColor}) ${mgr.tabGroupStatus}` : 'disabled'}`);
     if (mgr.isConnected()) {
+      if (mgr.pages().length) await mgr.ensureTabGroup();
+      lines.push(`tab group: ${cfg.tabGroup ? `"${mgr.groupTitle}" (${mgr.groupColor}) ${mgr.tabGroupStatus}` : 'disabled'}`);
       const pages = mgr.pages();
+      const total = mgr.pages(true).length;
       const active = await mgr.page();
-      lines.push(`tabs (${pages.length}):`);
+      lines.push(`tabs of this session (${pages.length}; ${total} in the browser overall, browser_tabs all=true lists them):`);
       for (const [i, p] of pages.entries()) lines.push(`  ${i}${p === active ? '*' : ' '} ${p.url()}`);
     }
     return text(lines.join('\n'));
@@ -114,35 +118,37 @@ export function registerBrowserTools(server: McpServer, mgr: BrowserManager, cfg
 
   server.registerTool('browser_tabs', {
     title: 'Tabs',
-    description: 'List, open, select, or close tabs. Indexes refer to the list returned by action=list.',
+    description: 'List, open, select, adopt, or close tabs. By default only this session\'s tabs are listed and indexed; all=true covers every tab in the browser (other sessions\' tabs included). Selecting or adopting a foreign tab moves it into this session.',
     inputSchema: {
-      action: z.enum(['list', 'new', 'select', 'close']),
-      index: z.number().int().optional().describe('Tab index for select/close (close defaults to the active tab)'),
+      action: z.enum(['list', 'new', 'select', 'adopt', 'close']),
+      index: z.number().int().optional().describe('Tab index for select/adopt/close (close defaults to the active tab)'),
       url: z.string().optional().describe('URL for action=new'),
+      all: z.boolean().optional().describe('Index over every tab in the browser instead of this session\'s tabs'),
       focus: z.boolean().optional().describe('select only: also raise the browser window (default false, so the user keeps their focus)'),
     },
-  }, guard(async ({ action, index, url, focus }) => {
+  }, guard(async ({ action, index, url, all, focus }) => {
     await mgr.ensure();
     if (action === 'new') {
       const p = await mgr.newPage(url);
       return text(`Opened tab ${mgr.pages().indexOf(p)}: ${p.url()}`);
     }
-    const pages = mgr.pages();
-    if (action === 'select') {
-      if (index === undefined || !pages[index]) throw new Error(`No tab at index ${index}`);
+    const pages = mgr.pages(all ?? action === 'adopt');
+    if (action === 'select' || action === 'adopt') {
+      if (index === undefined || !pages[index]) throw new Error(`No tab at index ${index}${all || action === 'adopt' ? '' : ' in this session (try all=true)'}`);
+      const wasForeign = !mgr.isOwned(pages[index]);
       mgr.setActive(pages[index]);
       if (focus) await pages[index].bringToFront();
-      return text(`Active tab ${index}: ${pages[index].url()}`);
+      return text(`Active tab${wasForeign ? ' (adopted into this session)' : ''}: ${pages[index].url()}`);
     }
     if (action === 'close') {
       const p = index === undefined ? await mgr.page() : pages[index];
       if (!p) throw new Error(`No tab at index ${index}`);
       await p.close();
-      return text(`Closed tab. Remaining: ${mgr.pages().length}`);
+      return text(`Closed tab. Remaining in this session: ${mgr.pages().length}`);
     }
-    const active = await mgr.page();
-    const lines = await Promise.all(pages.map(async (p, i) => `${i}${p === active ? '*' : ' '} ${JSON.stringify(await p.title().catch(() => ''))} ${p.url()}`));
-    return text(lines.join('\n') || 'no tabs');
+    const active = mgr.pages().length ? await mgr.page() : undefined;
+    const lines = await Promise.all(pages.map(async (p, i) => `${i}${p === active ? '*' : ' '}${all && !mgr.isOwned(p) ? ' [other]' : ''} ${JSON.stringify(await p.title().catch(() => ''))} ${p.url()}`));
+    return text(lines.join('\n') || (all ? 'no tabs' : 'no tabs in this session (all=true lists every tab)'));
   }));
 
   server.registerTool('browser_snapshot', {
@@ -431,7 +437,7 @@ export function registerBrowserTools(server: McpServer, mgr: BrowserManager, cfg
 
   server.registerTool('browser_close', {
     title: 'Close',
-    description: 'Detach from the browser (it keeps running, sessions stay alive) or quit it with kill=true.',
-    inputSchema: { kill: z.boolean().optional() },
-  }, guard(async ({ kill }) => text(await mgr.close(kill ?? false))));
+    description: 'Detach from the browser (it keeps running, sessions stay alive). closeTabs=true closes this session\'s tabs first; kill=true quits the whole browser, which in shared mode also ends every other session\'s work.',
+    inputSchema: { kill: z.boolean().optional(), closeTabs: z.boolean().optional() },
+  }, guard(async ({ kill, closeTabs }) => text(await mgr.close(kill ?? false, closeTabs ?? false))));
 }

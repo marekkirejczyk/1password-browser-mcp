@@ -8,6 +8,7 @@ import type { Logger } from './log.js';
 import { resolveBrowser, syncProfile, hasExtension, type BrowserInfo, type SyncResult } from './profile.js';
 import { frontmostProcessPid, activateProcess } from './mac.js';
 import { isLinux, isMac, hasDisplay, needsNoSandbox, inContainer, listeningPid as findListeningPid } from './platform.js';
+import { SessionRegistry, tryLaunchLock, findFreePort, type SessionRecord } from './sessions.js';
 
 export interface ConsoleEntry { time: number; type: string; text: string; location?: string }
 export interface NetworkEntry { time: number; method: string; url: string; resourceType: string; status?: number; failure?: string }
@@ -15,6 +16,8 @@ export interface NetworkEntry { time: number; method: string; url: string; resou
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const HELPER_EXTENSION_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'extension');
 const TAB_GROUP_COLORS = ['grey', 'blue', 'red', 'yellow', 'green', 'pink', 'purple', 'cyan', 'orange'];
+/** Colour per session number when none is configured. */
+const SESSION_PALETTE = ['purple', 'blue', 'green', 'orange', 'pink', 'cyan', 'yellow', 'red', 'grey'];
 
 export class BrowserManager {
   private browser?: Browser;
@@ -23,6 +26,17 @@ export class BrowserManager {
   private child?: ChildProcess;
   private synced = false;
   private connecting?: Promise<void>;
+  private shuttingDown = false;
+
+  /** Tabs this server opened (or adopted). Other sessions' tabs in a shared browser are never touched. */
+  private readonly owned = new Set<Page>();
+  /** chrome.tabs ids of owned pages, resolved through the tab-group extension worker. */
+  private readonly tabIds = new Map<Page, number>();
+  private tagCounter = 0;
+
+  readonly session: SessionRecord;
+  readonly groupTitle: string;
+  readonly groupColor: string;
 
   info: { browser?: BrowserInfo; userDataDirInUse?: string; launched: boolean; pid?: number; lastSync?: SyncResult } = { launched: false };
 
@@ -30,15 +44,22 @@ export class BrowserManager {
   readonly network = new WeakMap<Page, NetworkEntry[]>();
   readonly dialogs = new WeakMap<Page, Dialog>();
 
-  constructor(private cfg: Config, private log: Logger) {}
+  constructor(private cfg: Config, private log: Logger, readonly registry: SessionRegistry) {
+    this.session = registry.claim(cfg.sessionName, cfg.sessions);
+    const label = cfg.sessionName ?? (this.session.n === 1 ? '' : String(this.session.n));
+    this.groupTitle = label ? `${cfg.tabGroupTitle} ${label}` : cfg.tabGroupTitle;
+    this.groupColor = cfg.tabGroupColor && TAB_GROUP_COLORS.includes(cfg.tabGroupColor)
+      ? cfg.tabGroupColor
+      : SESSION_PALETTE[(this.session.n - 1) % SESSION_PALETTE.length];
+  }
 
   /* ------------------------------ connection ------------------------------ */
 
-  async isCdpUp(): Promise<boolean> {
+  async isCdpUp(url = this.cfg.cdpUrl): Promise<boolean> {
     try {
       const ctl = new AbortController();
       const t = setTimeout(() => ctl.abort(), 1500);
-      const res = await fetch(`${this.cfg.cdpUrl}/json/version`, { signal: ctl.signal });
+      const res = await fetch(`${url}/json/version`, { signal: ctl.signal });
       clearTimeout(t);
       return res.ok;
     } catch {
@@ -58,48 +79,96 @@ export class BrowserManager {
   }
 
   private async connect(): Promise<void> {
-    if (await this.isCdpUp()) {
+    let launchedNow = false;
+    if (this.cfg.sessions === 'isolated') {
+      launchedNow = await this.connectIsolated();
+    } else if (await this.isCdpUp()) {
       this.log.log(`attaching to existing browser at ${this.cfg.cdpUrl}`);
-      if (!this.info.userDataDirInUse) {
-        // Most likely a browser this server launched earlier (it outlives the server on purpose).
-        // Identify it from the listening process rather than from the configured preference.
-        const found = await this.resolveFromListeningProcess();
-        const info = found?.info ?? this.safeResolve();
-        this.info.browser = info;
-        if (found?.userDataDir) this.info.userDataDirInUse = found.userDataDir;
-        if (this.cfg.mode === 'mirror' && info && fs.existsSync(path.join(this.cfg.mirrorDir, info.kind, this.cfg.profileDir))) {
-          this.info.userDataDirInUse = path.join(this.cfg.mirrorDir, info.kind);
-        } else if (this.cfg.mode === 'direct' && info) {
-          this.info.userDataDirInUse = info.userDataDir;
-        }
-      }
+      await this.describeAttached();
     } else {
       if (this.cfg.mode === 'attach') {
         throw new Error(`No browser is listening at ${this.cfg.cdpUrl}. Start one with --remote-debugging-port=${this.cfg.port} --user-data-dir=<non-default dir>, or switch BROWSER_MCP_MODE to mirror.`);
       }
-      await this.launch();
+      launchedNow = await this.launchShared();
     }
+
     const browser = await chromium.connectOverCDP(this.cfg.cdpUrl, { timeout: 30000 });
     browser.on('disconnected', () => {
       this.log.log('browser disconnected');
       this.browser = undefined;
       this.context = undefined;
       this.active = undefined;
+      this.owned.clear();
+      this.tabIds.clear();
+      this.groupWorker = undefined;
     });
     const context = browser.contexts()[0] ?? (await browser.newContext());
     context.setDefaultTimeout(this.cfg.actionTimeoutMs);
     for (const p of context.pages()) this.wirePage(p);
-    context.on('page', (p) => {
-      this.wirePage(p);
-      // Extension popups/notifications (wallet prompts, 1Password) also arrive here; they must not hijack the active tab.
-      if (!p.url().startsWith('chrome-extension://')) this.active = p;
-      void this.ensureTabGroup();
-    });
+    // Tabs other sessions (or extensions) open also arrive here; they are observed, never adopted.
+    context.on('page', (p) => this.wirePage(p));
     this.browser = browser;
     this.context = context;
-    void this.ensureTabGroup();
     this.info.browser = this.info.browser ?? this.safeResolve();
     this.info.pid = this.info.pid ?? (await this.listeningPid());
+    if (launchedNow) {
+      // The window we just opened starts with one blank tab: that one is ours.
+      for (const p of context.pages()) if (p.url() === 'about:blank') { this.own(p); this.active = p; void this.tagPage(p).then(() => this.ensureTabGroup()); }
+    }
+  }
+
+  /** Shared mode: one launcher per port; everybody else waits for the CDP endpoint to come up. */
+  private async launchShared(): Promise<boolean> {
+    fs.mkdirSync(this.cfg.homeDir, { recursive: true, mode: 0o700 });
+    const release = tryLaunchLock(this.cfg.homeDir, this.cfg.port);
+    if (release) {
+      try {
+        if (await this.isCdpUp()) { await this.describeAttached(); return false; }
+        await this.launch();
+        return true;
+      } finally {
+        release();
+      }
+    }
+    this.log.log(`another session is launching the browser on port ${this.cfg.port}; waiting`);
+    const deadline = Date.now() + 90000;
+    while (Date.now() < deadline) {
+      if (await this.isCdpUp()) { await this.describeAttached(); return false; }
+      await sleep(300);
+    }
+    throw new Error(`Waited 90 s for another session to bring up the browser on port ${this.cfg.port}; it did not. Check ${this.cfg.logFile}.`);
+  }
+
+  /** Isolated mode: own port, own profile copy, own instance. */
+  private async connectIsolated(): Promise<boolean> {
+    if (this.cfg.mode === 'attach') throw new Error('BROWSER_MCP_SESSIONS=isolated cannot be combined with BROWSER_MCP_MODE=attach.');
+    if (!this.cfg.cdpUrlExplicit && !this.info.launched) {
+      this.cfg.port = await findFreePort(this.cfg.port + 1);
+      this.cfg.cdpUrl = `http://127.0.0.1:${this.cfg.port}`;
+    }
+    this.registry.update({ port: this.cfg.port });
+    if (await this.isCdpUp()) {
+      // Our own earlier instance (server restarted with ISOLATED_KEEP) or an explicit CDP_URL.
+      this.log.log(`attaching to isolated browser at ${this.cfg.cdpUrl}`);
+      await this.describeAttached();
+      return false;
+    }
+    const info = resolveBrowser(this.cfg.browser, this.cfg.executable, this.cfg.userDataDir);
+    const dir = path.join(this.cfg.mirrorDir, `${info.kind}-${this.cfg.sessionName ?? this.session.n}`);
+    await this.launch(dir);
+    return true;
+  }
+
+  private async describeAttached(): Promise<void> {
+    if (this.info.userDataDirInUse) return;
+    // Most likely a browser a server launched earlier (it outlives the server on purpose).
+    // Identify it from the listening process rather than from the configured preference.
+    const found = await this.resolveFromListeningProcess();
+    const info = found?.info ?? this.safeResolve();
+    this.info.browser = info;
+    if (found?.userDataDir) this.info.userDataDirInUse = found.userDataDir;
+    else if (this.cfg.mode === 'mirror' && info && fs.existsSync(path.join(this.cfg.mirrorDir, info.kind, this.cfg.profileDir))) this.info.userDataDirInUse = path.join(this.cfg.mirrorDir, info.kind);
+    else if (this.cfg.mode === 'direct' && info) this.info.userDataDirInUse = info.userDataDir;
   }
 
   /** Identifies the browser listening on the CDP port from its command line (binary path and --user-data-dir). */
@@ -120,13 +189,14 @@ export class BrowserManager {
     try { return resolveBrowser(this.cfg.browser, this.cfg.executable, this.cfg.userDataDir); } catch { return undefined; }
   }
 
-  private async launch(): Promise<void> {
+  /** Launches the browser; `userDataDirOverride` is the per-session copy in isolated mode. */
+  private async launch(userDataDirOverride?: string): Promise<void> {
     const info = resolveBrowser(this.cfg.browser, this.cfg.executable, this.cfg.userDataDir);
     this.info.browser = info;
     let userDataDir = info.userDataDir;
 
-    if (this.cfg.mode === 'mirror') {
-      const dst = path.join(this.cfg.mirrorDir, info.kind);
+    if (this.cfg.mode === 'mirror' || userDataDirOverride) {
+      const dst = userDataDirOverride ?? path.join(this.cfg.mirrorDir, info.kind);
       const needSync = this.cfg.mirrorSync === 'always' || (this.cfg.mirrorSync === 'once' && !this.synced) || !fs.existsSync(path.join(dst, this.cfg.profileDir));
       if (needSync) {
         this.log.log(`syncing profile ${info.userDataDir}/${this.cfg.profileDir} -> ${dst}`);
@@ -295,32 +365,55 @@ export class BrowserManager {
     });
     page.on('close', () => {
       if (this.active === page) this.active = undefined;
+      this.owned.delete(page);
+      this.tabIds.delete(page);
     });
   }
 
-  pages(): Page[] {
-    return (this.context?.pages() ?? []).filter((p) => !p.isClosed());
+  /** Takes a page under this session's control. */
+  private own(page: Page): void {
+    if (this.owned.has(page)) return;
+    this.wirePage(page);
+    this.owned.add(page);
+    // Windows our pages open (target=_blank, window.open) belong to us too.
+    page.on('popup', (p) => {
+      this.own(p);
+      void this.tagPage(p).then(() => this.ensureTabGroup());
+    });
+  }
+
+  isOwned(page: Page): boolean {
+    return this.owned.has(page);
+  }
+
+  /** Tabs of this session (default) or every tab in the browser. */
+  pages(all = false): Page[] {
+    const live = (this.context?.pages() ?? []).filter((p) => !p.isClosed());
+    return all ? live : live.filter((p) => this.owned.has(p));
   }
 
   async page(): Promise<Page> {
-    const ctx = await this.ensure();
-    if (this.active && !this.active.isClosed()) return this.active;
-    const pages = ctx.pages().filter((p) => !p.isClosed());
-    const preferred = pages.filter((p) => !p.url().startsWith('chrome-extension://') && !p.url().startsWith('devtools://'));
-    this.active = preferred[preferred.length - 1] ?? pages[pages.length - 1] ?? (await ctx.newPage());
+    await this.ensure();
+    if (this.active && !this.active.isClosed() && this.owned.has(this.active)) return this.active;
+    const mine = this.pages().filter((p) => !p.url().startsWith('chrome-extension://') && !p.url().startsWith('devtools://'));
+    this.active = mine[mine.length - 1] ?? (await this.newPage());
     return this.active;
   }
 
+  /** Makes a page the active one; a tab from another session is adopted by this one. */
   setActive(page: Page): void {
+    if (!this.owned.has(page)) { this.own(page); void this.tagPage(page).then(() => this.ensureTabGroup()); }
     this.active = page;
   }
 
   async newPage(url?: string): Promise<Page> {
     const ctx = await this.ensure();
     const page = await ctx.newPage();
+    this.own(page);
     this.active = page;
+    await this.tagPage(page);
     if (url) await page.goto(url, { waitUntil: 'domcontentloaded' });
-    await this.ensureTabGroup();
+    void this.ensureTabGroup();
     return page;
   }
 
@@ -355,37 +448,101 @@ export class BrowserManager {
     return pick?.worker;
   }
 
-  /** Puts every ordinary tab of the driven instance into one titled, coloured tab group. */
+  private async groupWorkerWithRetry(): Promise<Worker | undefined> {
+    // Service workers of freshly started extensions may not be registered with Playwright yet.
+    let worker = await this.findGroupWorker();
+    for (let i = 0; i < 10 && !worker; i++) { await sleep(300); worker = await this.findGroupWorker(); }
+    return worker;
+  }
+
+  /**
+   * Learns the chrome.tabs id of a page: its title is briefly set to a unique token that the extension
+   * worker looks up. Pages that block page scripts (LavaMoat wallets) keep working, just ungrouped.
+   */
+  private async tagPage(page: Page): Promise<void> {
+    if (!this.cfg.tabGroup || this.tabIds.has(page) || page.isClosed()) return;
+    const worker = await this.groupWorkerWithRetry();
+    if (!worker) return;
+    const token = `bmcp-${this.session.n}-${process.pid}-${++this.tagCounter}`;
+    try {
+      const previous = await page.evaluate((t) => { const o = document.title; document.title = t; return o; }, token);
+      let id: number | null = null;
+      for (let i = 0; i < 8 && id === null; i++) {
+        id = await worker.evaluate(async (q: string) => {
+          const c = (globalThis as unknown as { chrome: any }).chrome;
+          const tabs: Array<{ id: number }> = await c.tabs.query({ title: q });
+          return tabs[0]?.id ?? null;
+        }, token);
+        if (id === null) await sleep(120);
+      }
+      await page.evaluate((o) => { document.title = o; }, previous).catch(() => {});
+      if (id !== null) this.tabIds.set(page, id);
+    } catch (e) {
+      this.log.log(`tab tagging skipped: ${(e as Error).message.split('\n')[0]}`);
+    }
+  }
+
+  /** Keeps this session's tabs in one titled, coloured tab group. */
   async ensureTabGroup(): Promise<void> {
     if (!this.cfg.tabGroup || !this.context) return;
-    const color = TAB_GROUP_COLORS.includes(this.cfg.tabGroupColor) ? this.cfg.tabGroupColor : 'purple';
     try {
-      // Service workers of freshly started extensions may not be registered with Playwright yet.
-      let worker = await this.findGroupWorker();
-      for (let i = 0; i < 10 && !worker; i++) { await sleep(300); worker = await this.findGroupWorker(); }
+      const worker = await this.groupWorkerWithRetry();
       if (!worker) return;
-      await worker.evaluate(async ({ title, color }) => {
+      const ids = this.pages().map((p) => this.tabIds.get(p)).filter((id): id is number => id !== undefined);
+      if (!ids.length) return;
+      await worker.evaluate(async ({ ids, title, color }) => {
         const c = (globalThis as unknown as { chrome: any }).chrome;
+        // Only tabs whose ids we resolved ourselves: openerTabId is not usable here, because a tab created
+        // over CDP inherits the window's active tab as opener, which in a shared window may be another session's.
         const tabs: Array<{ id: number; url?: string; pendingUrl?: string; groupId: number; windowId: number }> = await c.tabs.query({});
-        const ours = tabs.filter((t) => !(t.url ?? t.pendingUrl ?? '').startsWith('chrome-extension://') && !(t.url ?? '').startsWith('devtools://'));
+        const mine = new Set<number>(ids);
         const groups: Array<{ id: number; title?: string; windowId: number }> = await c.tabGroups.query({ title });
         const byWindow = new Map<number, number[]>();
-        for (const t of ours) { if (t.groupId === -1 || !groups.some((g) => g.id === t.groupId)) byWindow.set(t.windowId, [...(byWindow.get(t.windowId) ?? []), t.id]); }
+        for (const t of tabs) {
+          if (!mine.has(t.id)) continue;
+          if (t.groupId !== -1 && groups.some((g) => g.id === t.groupId)) continue;
+          byWindow.set(t.windowId, [...(byWindow.get(t.windowId) ?? []), t.id]);
+        }
+        const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+        // tabGroups.update right after tabs.group can fail with "No group with id" while Chrome is still
+        // settling the new group; a few short retries cover it.
+        const update = async (groupId: number) => {
+          for (let i = 0; i < 5; i++) {
+            try { await c.tabGroups.update(groupId, { title, color }); return; } catch (e) { if (i === 4) throw e; await wait(150); }
+          }
+        };
         for (const [windowId, tabIds] of byWindow) {
           const existing = groups.find((g) => g.windowId === windowId);
-          const groupId: number = await c.tabs.group(existing ? { tabIds, groupId: existing.id } : { tabIds, createProperties: { windowId } });
-          await c.tabGroups.update(groupId, { title, color });
+          let groupId: number;
+          try {
+            groupId = await c.tabs.group(existing ? { tabIds, groupId: existing.id } : { tabIds, createProperties: { windowId } });
+          } catch {
+            groupId = await c.tabs.group({ tabIds, createProperties: { windowId } }); // the old group vanished meanwhile
+          }
+          await wait(100);
+          await update(groupId);
+          if (!existing) groups.push({ id: groupId, title, windowId });
         }
         for (const g of groups) await c.tabGroups.update(g.id, { title, color }).catch(() => {});
-      }, { title: this.cfg.tabGroupTitle, color });
+      }, { ids, title: this.groupTitle, color: this.groupColor });
     } catch (e) {
       this.tabGroupStatus = `failed: ${(e as Error).message.split('\n')[0]}`;
       this.log.log('tab group', this.tabGroupStatus);
     }
   }
 
-  async close(killBrowser: boolean): Promise<string> {
+  /* ------------------------------- lifecycle ------------------------------ */
+
+  /** Closes this session's tabs (shared) without touching anybody else's. */
+  async closeOwnedTabs(): Promise<number> {
+    const mine = this.pages();
+    await Promise.all(mine.map((p) => p.close().catch(() => {})));
+    return mine.length;
+  }
+
+  async close(killBrowser: boolean, closeTabs = false): Promise<string> {
     const notes: string[] = [];
+    if (closeTabs && this.browser?.isConnected()) notes.push(`closed ${await this.closeOwnedTabs()} tab(s) of this session`);
     if (killBrowser) {
       const pid = await this.browserPid();
       if (this.browser?.isConnected()) {
@@ -400,6 +557,30 @@ export class BrowserManager {
       notes.push('detached; browser left running');
     }
     return notes.join('; ') || 'nothing to do';
+  }
+
+  /** Server exit: shared sessions drop their tabs, isolated sessions take their browser and profile copy with them. */
+  async shutdown(): Promise<void> {
+    if (this.shuttingDown) return;
+    this.shuttingDown = true;
+    try {
+      if (this.cfg.sessions === 'isolated') {
+        if (!this.cfg.isolatedKeep) {
+          const dir = this.info.userDataDirInUse;
+          await this.close(true).catch(() => {});
+          const pid = this.info.pid;
+          if (pid) {
+            const deadline = Date.now() + 5000;
+            while (Date.now() < deadline) { try { process.kill(pid, 0); await sleep(150); } catch { break; } }
+          }
+          if (dir && dir.startsWith(this.cfg.mirrorDir)) { try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ } }
+        }
+      } else if (!this.cfg.keepTabs && this.browser?.isConnected()) {
+        await Promise.race([this.closeOwnedTabs(), sleep(2500)]);
+      }
+    } finally {
+      this.registry.release();
+    }
   }
 
   onePasswordInstalled(): boolean {

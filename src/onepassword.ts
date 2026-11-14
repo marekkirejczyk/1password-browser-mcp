@@ -297,7 +297,7 @@ export class OpClient {
   }
 
   async available(): Promise<boolean> {
-    try { await this.run(['--version'], 5000); return true; } catch { return false; }
+    try { await this.exec(['--version'], 5000, ''); return true; } catch { return false; }
   }
 
   async accounts(): Promise<OpAccount[]> {

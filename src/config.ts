@@ -33,14 +33,30 @@ export interface Config {
   onePasswordExtensionId: string;
   opAccount?: string;
   opPath: string;
-  /** Keep all driven tabs in one highlighted tab group (needs an extension with the tabGroups permission). */
+  /**
+   * shared   - every server attaches to one browser instance and owns only the tabs it opened (default).
+   * isolated - every server launches its own instance on its own profile copy and port.
+   */
+  sessions: 'shared' | 'isolated';
+  /** Label for this session's tab group and profile copy; defaults to a number from the session registry. */
+  sessionName?: string;
+  /** isolated: keep the browser and its profile copy running after the server exits. */
+  isolatedKeep: boolean;
+  /** shared: leave this session's tabs open when the server exits (default: close them). */
+  keepTabs: boolean;
+  /** Whether BROWSER_MCP_CDP_URL was given explicitly (isolated mode then does not pick its own port). */
+  cdpUrlExplicit: boolean;
+  /** Keep this session's tabs in one highlighted tab group (needs an extension with the tabGroups permission). */
   tabGroup: boolean;
   tabGroupTitle: string;
-  tabGroupColor: string;
+  /** Group colour; unset = one per session number. */
+  tabGroupColor?: string;
   snapshotMaxChars: number;
   snapshotAfterActions: boolean;
   actionTimeoutMs: number;
   logFile: string;
+  /** ~/.browser-mcp (or BROWSER_MCP_HOME_DIR): registry, locks, logs, profile copies. */
+  homeDir: string;
 }
 
 function env(name: string): string | undefined {
@@ -81,12 +97,18 @@ export function loadConfig(argv: string[] = process.argv.slice(2)): Config {
     onePasswordExtensionId: env('1P_EXTENSION_ID') ?? 'aeblfdkhhhdcdjpifhhbdiojplfjncoa',
     opAccount: env('OP_ACCOUNT'),
     opPath: env('OP_PATH') ?? 'op',
+    sessions: env('SESSIONS') === 'isolated' ? 'isolated' : 'shared',
+    sessionName: env('SESSION_NAME'),
+    isolatedKeep: bool(env('ISOLATED_KEEP'), false),
+    keepTabs: bool(env('KEEP_TABS'), false),
+    cdpUrlExplicit: !!env('CDP_URL'),
     tabGroup: bool(env('TAB_GROUP'), true),
     tabGroupTitle: env('TAB_GROUP_TITLE') ?? 'Claude',
-    tabGroupColor: env('TAB_GROUP_COLOR') ?? 'purple',
+    tabGroupColor: env('TAB_GROUP_COLOR'),
     snapshotMaxChars: Number(env('SNAPSHOT_MAX_CHARS') ?? 20000),
     snapshotAfterActions: bool(env('SNAPSHOT_AFTER_ACTIONS'), false),
     actionTimeoutMs: Number(env('ACTION_TIMEOUT_MS') ?? 15000),
     logFile: env('LOG_FILE') ?? path.join(base, 'browser-mcp.log'),
+    homeDir: base,
   };
 }

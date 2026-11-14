@@ -3,6 +3,7 @@ import { createRequire } from 'node:module';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { loadConfig } from './config.js';
+import { SessionRegistry } from './sessions.js';
 import { Logger } from './log.js';
 import { BrowserManager } from './browser.js';
 import { registerBrowserTools } from './tools.js';
@@ -15,7 +16,22 @@ const { version } = require('../package.json') as { version: string };
 
 const cfg = loadConfig();
 const log = new Logger(cfg.logFile);
-const mgr = new BrowserManager(cfg, log);
+const registry = new SessionRegistry(cfg.homeDir);
+const mgr = new BrowserManager(cfg, log, registry);
+
+// Leaving cleanly matters more with several sessions: shared sessions drop their tabs, isolated ones
+// their browser. stdin closing is how an MCP client ends the server.
+let exiting = false;
+async function exitGracefully(code = 0): Promise<void> {
+  if (exiting) return;
+  exiting = true;
+  await Promise.race([mgr.shutdown(), new Promise((r) => setTimeout(r, 8000))]).catch(() => {});
+  process.exit(code);
+}
+process.stdin.on('end', () => void exitGracefully(0));
+process.stdin.on('close', () => void exitGracefully(0));
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) process.on(sig, () => void exitGracefully(0));
+process.on('exit', () => registry.release());
 
 process.on('uncaughtException', (e) => log.log('uncaughtException', e?.stack ?? String(e)));
 process.on('unhandledRejection', (e) => log.log('unhandledRejection', (e as Error)?.stack ?? String(e)));
@@ -23,7 +39,7 @@ process.on('unhandledRejection', (e) => log.log('unhandledRejection', (e as Erro
 async function doctor(launch: boolean): Promise<void> {
   const out = (s: string) => process.stdout.write(s + '\n');
   out(`1password-browser-mcp ${version} doctor`);
-  out(`mode: ${cfg.mode}`);
+  out(`mode: ${cfg.mode}; sessions: ${cfg.sessions}; this session #${mgr.session.n}; live sessions: ${registry.list().map((r) => `#${r.n} ${r.mode}${r.port ? ` port ${r.port}` : ''}`).join(', ')}`);
   try {
     const b = resolveBrowser(cfg.browser, cfg.executable, cfg.userDataDir);
     out(`browser: ${b.name}\n  executable: ${b.executable}\n  user data dir: ${b.userDataDir}`);
@@ -62,7 +78,8 @@ async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   if (argv.includes('doctor')) {
     await doctor(argv.includes('--launch'));
-    process.exit(0);
+    await exitGracefully(0);
+    return;
   }
   const server = new McpServer({ name: '1password-browser-mcp', version }, {
     instructions: [
