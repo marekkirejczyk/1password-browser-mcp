@@ -1,19 +1,21 @@
 #!/usr/bin/env bash
-# Turns this Mac into the self-hosted GitHub Actions runner for the e2e workflow and stores the 1Password
-# service account token in its login keychain. Run it once, from a Terminal of the user that stays logged
-# in on this machine (the runner is installed as a LaunchAgent in that user's session, which is what gives
-# it an unlocked login keychain and a display for Chrome).
+# Turns this Mac into the self-hosted GitHub Actions runner for the e2e workflow and gives it the 1Password
+# service account token. Run it once as the user that stays logged in on this machine: the runner is
+# installed as a LaunchAgent in that user's session, which is what gives it a display for Chrome.
 #
 #   RUNNER_TOKEN=<registration token> scripts/setup-runner.sh
 #
 # The registration token comes from GitHub: repository Settings > Actions > Runners > New self-hosted
 # runner (it expires after an hour). With the gh CLI signed in you can leave RUNNER_TOKEN unset and the
-# script fetches one. The 1Password token is asked for interactively and never echoed or written to disk
-# outside the keychain. Nothing here needs sudo.
+# script fetches one. The 1Password token is asked for interactively (or read from OP_SERVICE_ACCOUNT_TOKEN
+# when set) and never echoed. From a Terminal on the machine it goes into the login keychain; over SSH the
+# keychain is locked, so it goes into the runner's private .env file instead (owner-only; the runner
+# exports it to jobs). Node is installed by the workflow itself (setup-node), so only Chrome is required.
+# Nothing here needs sudo.
 set -euo pipefail
 
 REPO="${REPO:-marekkirejczyk/1password-browser-mcp}"
-RUNNER_DIR="${RUNNER_DIR:-$HOME/actions-runner}"
+RUNNER_DIR="${RUNNER_DIR:-$HOME/actions-runner-browser-mcp}"
 RUNNER_LABELS="${RUNNER_LABELS:-browser-mcp}"
 KEYCHAIN_SERVICE="${KEYCHAIN_SERVICE:-browser-mcp-op-service-account}"
 
@@ -22,20 +24,23 @@ die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
 [ "$(uname -s)" = Darwin ] || die "this script is for macOS"
 [ -x "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" ] || die "install Google Chrome first"
-command -v node >/dev/null || die "install Node 20+ first (brew install node); the runner captures this shell's PATH"
-node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 20 ? 0 : 1)' || die "Node 20+ is required, found $(node --version)"
 
-say "1Password service account token -> login keychain ($KEYCHAIN_SERVICE)"
+say "1Password service account token"
+OP_TOKEN="${OP_SERVICE_ACCOUNT_TOKEN:-}"
+ENV_TOKEN=""
 if security find-generic-password -s "$KEYCHAIN_SERVICE" >/dev/null 2>&1; then
-  echo "already stored; leaving it alone (delete with: security delete-generic-password -s $KEYCHAIN_SERVICE)"
+  echo "already in the login keychain as $KEYCHAIN_SERVICE; leaving it alone"
 else
-  printf 'Paste the service account token (input hidden): '
-  read -rs OP_TOKEN; echo
+  if [ -z "$OP_TOKEN" ]; then printf 'Paste the service account token (input hidden): '; read -rs OP_TOKEN; echo; fi
   [[ "$OP_TOKEN" == ops_* ]] || die "that does not look like a service account token (expected ops_...)"
-  security add-generic-password -a "$USER" -s "$KEYCHAIN_SERVICE" -w "$OP_TOKEN"
-  unset OP_TOKEN
-  echo "stored"
+  if security add-generic-password -a "$USER" -s "$KEYCHAIN_SERVICE" -w "$OP_TOKEN" 2>/dev/null; then
+    echo "stored in the login keychain as $KEYCHAIN_SERVICE"
+  else
+    echo "login keychain is locked in this session (SSH?); the token will go into $RUNNER_DIR/.env instead"
+    ENV_TOKEN="$OP_TOKEN"
+  fi
 fi
+unset OP_TOKEN
 
 say "GitHub runner registration token"
 if [ -z "${RUNNER_TOKEN:-}" ]; then
@@ -59,7 +64,12 @@ fi
 
 say "Registering with github.com/$REPO"
 ./config.sh --unattended --replace --url "https://github.com/$REPO" --token "$RUNNER_TOKEN" \
-  --name "$(scutil --get ComputerName | tr ' ' '-')" --labels "$RUNNER_LABELS" --work _work
+  --name "$(scutil --get ComputerName | tr -c 'A-Za-z0-9\n' '-')-browser-mcp" --labels "$RUNNER_LABELS" --work _work
+if [ -n "$ENV_TOKEN" ]; then
+  (umask 077; printf 'OP_SERVICE_ACCOUNT_TOKEN=%s\n' "$ENV_TOKEN" > .env); chmod 600 .env
+  unset ENV_TOKEN
+  echo "token written to $RUNNER_DIR/.env (mode 600; the runner exports it to jobs)"
+fi
 
 say "Installing as a LaunchAgent (starts at login, runs in your session)"
 ./svc.sh install
@@ -69,6 +79,9 @@ say "Installing as a LaunchAgent (starts at login, runs in your session)"
 cat <<MSG
 
 Done. Keep this user logged in (System Settings > Users & Groups > automatic login, and no sleep under
-Energy). The first job may show a keychain dialog asking to allow "security" to read the token: choose
-Always Allow. Check the runner at https://github.com/$REPO/settings/actions/runners
+Energy). If the token is in the keychain, the first job may show a dialog asking to allow "security" to
+read it: choose Always Allow. To move a token from .env into the keychain later, run on this machine's
+console: security add-generic-password -a "\$USER" -s $KEYCHAIN_SERVICE -w <token>; then delete .env and
+restart the runner (./svc.sh stop && ./svc.sh start). Check the runner at
+https://github.com/$REPO/settings/actions/runners
 MSG

@@ -1,9 +1,10 @@
 # End-to-end test on a self-hosted macOS runner.
 #
-# The runner is a Mac that has Google Chrome, Node 20+ and the 1Password service account token in its
-# login keychain (item "browser-mcp-op-service-account"). The test reads the token from that keychain
-# itself, so no secret is stored in GitHub, passed through workflow inputs, or printed in logs.
-# GitHub-hosted runners never run this job.
+# The runner is a Mac that has Google Chrome and the 1Password service account token either in the
+# runner's own .env file (OP_SERVICE_ACCOUNT_TOKEN) or in its login keychain (item
+# "browser-mcp-op-service-account"). The test picks the token up from there itself, so no secret is
+# stored in GitHub, passed through workflow inputs, or printed in logs. Node comes from setup-node's
+# tool cache on the runner. GitHub-hosted runners never run this job.
 name: e2e
 
 on:
@@ -22,7 +23,7 @@ jobs:
     name: two-tab sign-in through the 1Password SDK
     # Only code from this repository may run on the self-hosted machine; fork PRs are skipped.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted, macOS]
+    runs-on: [self-hosted, macOS, browser-mcp]
     timeout-minutes: 15
     env:
       BROWSER_MCP_TEST_VAULT: Agent
@@ -31,12 +32,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
       - name: Toolchain
         run: |
           node --version
           npm --version
           test -x "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-          security find-generic-password -s browser-mcp-op-service-account >/dev/null
+          # The token must already be on this machine; this only checks presence, never prints it.
+          if [ -z "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]; then security find-generic-password -s browser-mcp-op-service-account >/dev/null; fi
 
       - name: Install
         run: npm ci

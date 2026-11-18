@@ -219,13 +219,15 @@ It needs a service account token with read access to one vault of test logins:
 | `E2E_VERBOSE` | | print every tool call and timing |
 
 [`.github/workflows/e2e.yml`](.github/workflows/e2e.yml) runs the same command on a **self-hosted macOS
-runner**, so the token never leaves that machine: GitHub stores no secret, the workflow passes none, and
-the job only runs for code from this repository (fork pull requests are skipped, which matters because
-the repository is public). To set up the runner on a Mac that stays logged in, run
-[`scripts/setup-runner.sh`](scripts/setup-runner.sh) there once: it stores the token in the login keychain,
-registers the machine with the repository and installs the runner as a LaunchAgent in that user's session,
-which is what gives jobs an unlocked keychain and a display. The runner captures the PATH of the shell that
-ran the script, so Node 20+ must be on it. Chrome must be installed.
+runner** (labels `self-hosted, macOS, browser-mcp`), so the token never leaves that machine: GitHub
+stores no secret, the workflow passes none, and the job only runs for code from this repository (fork
+pull requests are skipped, which matters because the repository is public). Node comes from
+`actions/setup-node`; the machine only needs Chrome. To set up the runner on a Mac that stays logged in,
+run [`scripts/setup-runner.sh`](scripts/setup-runner.sh) there once: it registers the machine with the
+repository, installs the runner as a LaunchAgent in that user's session (which gives jobs a display),
+and puts the token in the login keychain, or, when run over SSH where the keychain is locked, in the
+runner's private `.env` file, which the runner exports to jobs. Both places count as runner-local; the
+keychain is preferable, and the script prints how to move the token there later.
 
 ## Configuration (environment or `--key=value`)
 
