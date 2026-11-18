@@ -98,13 +98,12 @@ await call('browser_evaluate', { expression: 'setTimeout(() => confirm("smoke di
 await new Promise((r) => setTimeout(r, 500));
 await call('browser_dialog', { accept: true }, (t) => /Accepted confirm: smoke dialog/.test(t));
 
-// 1Password on the login page: no extension in profile and no `op` on this machine, so both must fail cleanly.
+// 1Password on the login page: the smoke test runs without OP_SERVICE_ACCOUNT_TOKEN, so every tool must fail cleanly.
 await call('browser_navigate', { url: LOGIN_URL, snapshot: false }, (t) => /Navigated to/.test(t));
-await call('onepassword_status', {}, (t) => /extension .* in profile: no/.test(t) && /cli .*: not found/.test(t));
-await expectError('onepassword_fill', {}, /cli: .*1Password CLI not found|cli: .*op|extension not found/i);
-await expectError('onepassword_fill', { strategy: 'shortcut' }, /only supported on macOS|extension not found/i);
-await expectError('onepassword_otp', {}, /not found|no one-time/i);
-await expectError('onepassword_items', {}, /not found/i);
+await call('onepassword_status', {}, (t) => /OP_SERVICE_ACCOUNT_TOKEN not set/.test(t));
+await expectError('onepassword_fill', {}, /not configured/i);
+await expectError('onepassword_otp', {}, /not configured|no one-time/i);
+await expectError('onepassword_items', {}, /not configured/i);
 
 await call('browser_status', { connect: false }, (t) => /tabs \(\d+\)/.test(t));
 if (!keep) await call('browser_close', { kill: true }, (t) => /SIGTERM|closed/.test(t));

@@ -118,10 +118,6 @@ export function listProfiles(userDataDir: string): string[] {
   }
 }
 
-export function hasExtension(userDataDir: string, profileDir: string, extensionId: string): boolean {
-  return fs.existsSync(path.join(userDataDir, profileDir, 'Extensions', extensionId));
-}
-
 /* ----------------------------- profile mirroring ----------------------------- */
 
 const ROOT_FILES = ['Local State', 'First Run'];

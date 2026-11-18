@@ -28,11 +28,10 @@ export interface Config {
   headless: boolean;
   disableSync: boolean;
   extraArgs: string[];
-  /** Shortcut that opens the 1Password extension popup (its "_execute_action" command, see chrome://extensions/shortcuts). Only used by strategy=shortcut (macOS). */
-  onePasswordShortcut: string;
-  onePasswordExtensionId: string;
-  opAccount?: string;
-  opPath: string;
+  /** 1Password service account token (OP_SERVICE_ACCOUNT_TOKEN, the SDK's own variable). Unset = 1Password tools unavailable. */
+  opToken?: string;
+  /** Vault titles or ids the server may read (BROWSER_MCP_OP_VAULTS, comma-separated); empty = every vault the token can see. */
+  opVaults: string[];
   /**
    * shared   - every server attaches to one browser instance and owns only the tabs it opened (default).
    * isolated - every server launches its own instance on its own profile copy and port.
@@ -93,10 +92,8 @@ export function loadConfig(argv: string[] = process.argv.slice(2)): Config {
     headless: bool(env('HEADLESS'), false),
     disableSync: bool(env('DISABLE_SYNC'), true),
     extraArgs: (env('ARGS') ?? '').split(/\s+/).filter(Boolean),
-    onePasswordShortcut: env('1P_SHORTCUT') ?? (process.platform === 'darwin' ? 'cmd+shift+x' : 'ctrl+shift+x'),
-    onePasswordExtensionId: env('1P_EXTENSION_ID') ?? 'aeblfdkhhhdcdjpifhhbdiojplfjncoa',
-    opAccount: env('OP_ACCOUNT'),
-    opPath: env('OP_PATH') ?? 'op',
+    opToken: process.env.OP_SERVICE_ACCOUNT_TOKEN || undefined,
+    opVaults: (env('OP_VAULTS') ?? '').split(',').map((v) => v.trim()).filter(Boolean),
     sessions: env('SESSIONS') === 'isolated' ? 'isolated' : 'shared',
     sessionName: env('SESSION_NAME'),
     isolatedKeep: bool(env('ISOLATED_KEEP'), false),

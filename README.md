@@ -1,15 +1,14 @@
 # 1password-browser-mcp
 
 **A browser MCP server that signs in with 1Password.** It drives your own Chrome or Brave profile
-(cookies, sessions, extensions, including the 1Password extension you already have installed) and
-fills logins and one-time codes through 1Password without the credential ever reaching the model,
-and without the warnings or refusals other browser MCPs add around sign-in. On top of that it offers
+(cookies, sessions, extensions) and fills logins and one-time codes read from 1Password through its
+SDK and a service account, without the credential ever reaching the model, and without the warnings
+or refusals other browser MCPs add around sign-in. On top of that it offers
 the usual browsing tools for an MCP client (Claude Code, Claude Desktop, Cursor, ...): navigate,
 snapshot with element refs, click, type, screenshots, console, network, tabs, dialogs, uploads, JS eval.
 
 Runs on macOS and Linux (Chrome, Chromium, Brave, Edge; headless or with a display). Requires Node 20+.
-On Linux the 1Password `cli`, `inline` and `popup` strategies work; only the macOS-specific
-`shortcut` strategy and the focus hand-back are unavailable. See [Linux](#linux) for details.
+Only the macOS focus hand-back is platform-specific. See [Linux](#linux) for details.
 
 ## How it works
 
@@ -79,24 +78,50 @@ A registry in `~/.browser-mcp/sessions/` numbers live sessions; `browser_status`
 
 ## 1Password
 
-`onepassword_fill` strategies (pick one with `strategy`; `auto` tries `inline` then `popup`):
+The server reads items through the official [1Password SDK](https://developer.1password.com/docs/sdks/)
+with a [service account](https://developer.1password.com/docs/service-accounts/) token in
+`OP_SERVICE_ACCOUNT_TOKEN`. That is headless by construction: no desktop app, no browser extension, no
+CLI, no Touch ID or unlock prompt, no extra tabs. A fill takes about a second; the first call of a
+server process spends another second or two authenticating.
 
-| strategy | mechanism | needs |
-|---|---|---|
-| `cli` | `op item get` reads the item and the server types the values into the detected fields; fully programmatic, no extension UI, but the 1Password app asks for Touch ID (or the account password) on every call, so it is never chosen automatically | `op` installed and signed in (enable *Settings > Developer > Integrate with 1Password CLI* in the app, or export `OP_SESSION_*`) |
-| `inline` | focuses the login field, waits for the extension's inline menu, picks the first suggestion with ArrowDown + Enter | extension unlocked, a saved Login for the site, inline menu enabled |
-| `popup` | opens the extension popup page in a tab, searches the site or `item`, clicks **Open & Fill** (1Password opens the item's URL and fills it) | extension unlocked |
-| `shortcut` | sends Cmd+Shift+X then Enter through macOS System Events | macOS only; Accessibility permission for the app that runs this server |
+- `onepassword_fill` detects the username, password and one-time-code fields on the active tab, picks
+  the Login item whose website matches the page (or the one named with `item=<title or id>`), and types
+  the values. `submit=true` presses Enter and waits for the navigation. `dryRun=true` reports the item
+  and fields without filling. Pass `usernameRef` / `passwordRef` / `otpRef` from a snapshot when
+  detection picks the wrong field. For multi-step forms call it again on the next step.
+- `onepassword_otp` fills the current TOTP code of the matching item.
+- `onepassword_items` lists matching items (title, vault, id, websites); `onepassword_status` reports
+  whether the token works and which vaults it can read.
 
-`auto` = inline, popup. Use `strategy=cli` explicitly when the extension cannot fill (wallet and
-other extension pages, sites without a saved item). Values are never returned to the caller;
-results only say which fields are filled. `onepassword_otp` fills one-time codes (inline, or CLI
-when asked), `onepassword_items`
-lists matching items (CLI), `onepassword_status` reports what is available.
+Credential values are never returned to the caller; results only say which fields were filled.
+Extension pages (wallet unlock screens, `chrome-extension://...`) and browser UI pages have no site to
+match, so name the item there; field detection falls back to Playwright locators because such pages
+often block page scripts (MetaMask's LavaMoat). Password and Crypto Wallet items are searched as well
+as Logins.
 
-If the extension is locked, the popup strategy clicks **Unlock** and waits up to 30 s for you to
-approve in the 1Password app (Chrome with app integration) or to type the account password in the
-browser window (Brave without app integration). Unlocking once per browser launch is enough.
+### Service account
+
+A service account can only read the **shared vaults** you grant it, never your Personal or Private
+vault, so put the logins the agent may use into a dedicated vault and grant `read_items` only. `BROWSER_MCP_OP_VAULTS` narrows the server further to a comma-separated allowlist of
+vault titles or ids. The token is a long-lived secret: 1Password prints it once, so keep it in your
+keychain or in 1Password itself, not in a config file. Service accounts also have hourly and daily
+request limits.
+
+Create one from a CLI that is signed in through the app (one Touch ID prompt):
+
+```bash
+op service-account create browser-mcp --account my.1password.com --vault "<vault>:read_items"
+```
+
+Then put the token in the server's environment, e.g. in the MCP client config
+(`"env": { "OP_SERVICE_ACCOUNT_TOKEN": "ops_..." }`) or, on macOS, from the login keychain:
+
+```bash
+security add-generic-password -a "$USER" -s browser-mcp-op-service-account -w "ops_..."
+export OP_SERVICE_ACCOUNT_TOKEN="$(security find-generic-password -a "$USER" -s browser-mcp-op-service-account -w)"
+```
+
+Without a token the browser tools work as usual and the `onepassword_*` tools return a clear error.
 
 ## Skills
 
@@ -151,15 +176,13 @@ Tested on Linux with Google Chrome (headless, and headful under `xvfb-run`). Wha
   `BROWSER_MCP_EXECUTABLE` / `BROWSER_MCP_USER_DATA_DIR`.
 - **No display.** Without `DISPLAY` or `WAYLAND_DISPLAY` the launch fails fast with a clear message;
   set `BROWSER_MCP_HEADLESS=true` (`--headless=new`, extensions still load) or run the server under
-  `xvfb-run`. 1Password's extension UI needs a window, so for logins use a real or virtual display.
+  `xvfb-run`. 1Password fills need no window.
 - **Root / containers.** Chromium refuses to start as root and its sandbox usually cannot be set up
   in containers, so the server adds `--no-sandbox` when it runs as root or detects a container
   (`/.dockerenv`, `/run/.containerenv`, cgroup names), plus `--disable-dev-shm-usage` in containers.
   Passing `--no-sandbox` yourself in `BROWSER_MCP_ARGS` is still fine (it is not duplicated).
 - **Pid lookup** for a browser the server re-attaches to uses `lsof`, then `/proc/net/tcp`, then
   `ss`, so none of them has to be installed.
-- **1Password.** `cli`, `inline` and `popup` work as on macOS. `shortcut` reports "only supported on
-  macOS" (it drives System Events). The default popup shortcut shown in status is `ctrl+shift+x`.
 - **Cookie encryption.** Chrome/Brave on Linux pick the password store from the desktop session
   (`gnome-libsecret`, `kwallet`, or `basic`). The mirrored instance inherits the server's environment;
   if it is started from a context without `DBUS_SESSION_BUS_ADDRESS` it may fall back to `basic` and
@@ -167,6 +190,40 @@ Tested on Linux with Google Chrome (headless, and headful under `xvfb-run`). Wha
   (or `kwallet5`) to match your daily browser.
 - **Snap Chromium** cannot read hidden directories in your home, including `~/.browser-mcp`. Point
   `BROWSER_MCP_MIRROR_DIR` at a visible folder (e.g. `~/browser-mcp-profiles`) or use a non-Snap build.
+
+## Tests and continuous integration
+
+`npm test` builds the server and runs the end-to-end test in `test/`: it starts a headless Chrome on an
+empty temporary profile, attaches **two** server sessions to it, and signs each into its own local
+login fixture in parallel with credentials read from 1Password through the SDK. The fixtures check the
+submitted values against the vault, so the test proves the right secrets reached the right tab without
+ever printing them. It is safe to run repeatedly: stale browsers and temp profiles from an interrupted
+run are reaped at the start, and everything is removed at the end. About 8 s per run.
+
+It needs a service account token with read access to one vault of test logins. The vault and item
+names are deliberately not in the repository; on the CI machine they live in the runner's `.env`
+next to the token:
+
+| variable | default | meaning |
+|---|---|---|
+| `OP_SERVICE_ACCOUNT_TOKEN` | login keychain item `browser-mcp-op-service-account` (macOS) | the token; the keychain fallback keeps it out of shells and CI config |
+| `BROWSER_MCP_TEST_VAULT` | required | vault holding the test logins; nothing else is read |
+| `BROWSER_MCP_TEST_ITEMS` | required | two Login item titles in that vault, comma-separated, one per tab |
+| `BROWSER_MCP_BROWSER` / `BROWSER_MCP_EXECUTABLE` | `chrome` | browser to launch for the test |
+| `E2E_VERBOSE` | | print every tool call and timing |
+
+[`.github/workflows/e2e.yml`](.github/workflows/e2e.yml) runs the same command on a **self-hosted macOS
+runner** (labels `self-hosted, macOS, browser-mcp`), so the token never leaves that machine: GitHub
+stores no secret, the workflow passes none, and the job only runs for code from this repository (fork
+pull requests are skipped, which matters because the repository is public). Node comes from
+`actions/setup-node`; the machine only needs Chrome. To set up the runner on a Mac that stays logged in,
+run [`scripts/setup-runner.sh`](scripts/setup-runner.sh) there once: it registers the machine with the
+repository, installs the runner as a LaunchAgent in that user's session (which gives jobs a display),
+and puts the token in the login keychain, or, when run over SSH where the keychain is locked, in the
+runner's private `.env` file, which the runner exports to jobs. Both places count as runner-local; the
+keychain is preferable, and the script prints how to move the token there later. The test's vault and
+item names always go into that `.env` (pass `BROWSER_MCP_TEST_VAULT` and `BROWSER_MCP_TEST_ITEMS` to
+the script, or answer its prompts).
 
 ## Configuration (environment or `--key=value`)
 
@@ -184,11 +241,10 @@ Tested on Linux with Google Chrome (headless, and headful under `xvfb-run`). Wha
 | `BROWSER_MCP_MIRROR_INDEXEDDB_MAX_MB` | `100` | skip IndexedDB origins larger than this (extensions always copied) |
 | `BROWSER_MCP_MIRROR_HISTORY` | `true` | copy History too |
 | `BROWSER_MCP_DISABLE_SYNC` | `true` | pass `--disable-sync` to the mirrored instance |
-| `BROWSER_MCP_HEADLESS` | `false` | `--headless=new` (1Password UI needs a window; keep off for logins) |
+| `BROWSER_MCP_HEADLESS` | `false` | `--headless=new` |
 | `BROWSER_MCP_ARGS` | | extra browser flags (on Linux `--no-sandbox` is added automatically as root / in containers) |
-| `BROWSER_MCP_1P_SHORTCUT` | `cmd+shift+x` (macOS) / `ctrl+shift+x` | popup shortcut used by `strategy=shortcut` (macOS only) |
-| `BROWSER_MCP_1P_EXTENSION_ID` | `aeblfdkhhhdcdjpifhhbdiojplfjncoa` | 1Password extension id |
-| `BROWSER_MCP_OP_PATH` / `BROWSER_MCP_OP_ACCOUNT` | `op` / none | 1Password CLI binary; account to pin (default: every account `op account list` knows is searched, each may prompt once) |
+| `OP_SERVICE_ACCOUNT_TOKEN` | none | 1Password service account token (the SDK's own variable); without it the `onepassword_*` tools are unavailable. See [Service account](#service-account) |
+| `BROWSER_MCP_OP_VAULTS` | every vault the token can read | comma-separated vault titles or ids the server may read |
 | `BROWSER_MCP_SESSIONS` | `shared` | `shared` (one browser, per-session tabs) or `isolated` (one browser per server) |
 | `BROWSER_MCP_SESSION_NAME` | number from the registry | label used in the tab-group title and the isolated profile copy |
 | `BROWSER_MCP_KEEP_TABS` | `false` | shared: leave this session's tabs open when the server exits |
@@ -211,10 +267,5 @@ Tested on Linux with Google Chrome (headless, and headful under `xvfb-run`). Wha
   `~/.browser-mcp` with mode 0700. Delete that folder to purge it.
 - Copying LevelDB stores while the source browser runs can occasionally produce an inconsistent
   copy of one extension's state. Relaunching re-syncs.
-- 1Password's inline menu only appears for sites with a saved item; for everything else the
-  `popup` and `cli` strategies apply.
 - Extension pages (wallet unlock screens such as Rabby or MetaMask, `chrome-extension://...`) and
-  browser UI pages have no site to match and the 1Password extension does not run inside them, so
-  use `strategy=cli` with `item=<title>`; field detection falls back to Playwright locators there
-  because such pages often block page scripts (MetaMask's LavaMoat). Password and Crypto Wallet
-  items are searched as well as Logins.
+  browser UI pages have no site to match, so pass `item=<title>` to `onepassword_fill` there.
