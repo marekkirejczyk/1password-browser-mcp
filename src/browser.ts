@@ -85,6 +85,7 @@ export class BrowserManager {
     } else if (await this.isCdpUp()) {
       this.log.log(`attaching to existing browser at ${this.cfg.cdpUrl}`);
       await this.describeAttached();
+      await this.openWindowIfNone();
     } else {
       if (this.cfg.mode === 'attach') {
         throw new Error(`No browser is listening at ${this.cfg.cdpUrl}. Start one with --remote-debugging-port=${this.cfg.port} --user-data-dir=<non-default dir>, or switch BROWSER_MCP_MODE to mirror.`);
@@ -157,6 +158,36 @@ export class BrowserManager {
     const dir = path.join(this.cfg.mirrorDir, `${info.kind}-${this.cfg.sessionName ?? this.session.n}`);
     await this.launch(dir);
     return true;
+  }
+
+  /**
+   * macOS Chrome unloads the profile when its last window closes but keeps running, and a browser with no
+   * loaded profile fails connectOverCDP ("Browser.setDownloadBehavior: Browser context management is not
+   * supported"). Running the binary on the same --user-data-dir hands a new window to the running instance
+   * through its process singleton, which loads the profile again.
+   */
+  private async openWindowIfNone(): Promise<void> {
+    if (this.cfg.headless || await this.hasPageTarget()) return;
+    const executable = this.info.browser?.executable;
+    const userDataDir = this.info.userDataDirInUse;
+    if (!executable || !userDataDir) return;
+    this.log.log(`browser at ${this.cfg.cdpUrl} has no window; opening one so its profile loads`);
+    const previousPid = isMac ? await frontmostProcessPid().catch(() => undefined) : undefined;
+    spawn(executable, [`--user-data-dir=${userDataDir}`, `--profile-directory=${this.cfg.profileDir}`, 'about:blank'], { detached: true, stdio: 'ignore' }).unref();
+    const deadline = Date.now() + 10000;
+    while (Date.now() < deadline && !(await this.hasPageTarget())) await sleep(250);
+    if (previousPid) void this.restoreFocus(previousPid);
+  }
+
+  /** Whether the browser has at least one tab; an unreadable target list counts as yes, so nothing is opened by mistake. */
+  private async hasPageTarget(): Promise<boolean> {
+    try {
+      const res = await fetch(`${this.cfg.cdpUrl}/json/list`, { signal: AbortSignal.timeout(1500) });
+      const targets = (await res.json()) as Array<{ type: string }>;
+      return targets.some((t) => t.type === 'page');
+    } catch {
+      return true;
+    }
   }
 
   private async describeAttached(): Promise<void> {
@@ -533,9 +564,14 @@ export class BrowserManager {
 
   /* ------------------------------- lifecycle ------------------------------ */
 
-  /** Closes this session's tabs (shared) without touching anybody else's. */
+  /**
+   * Closes this session's tabs (shared) without touching anybody else's. When they are the browser's last
+   * tabs a blank one is opened first, so the window and its profile stay for the next session (see openWindowIfNone).
+   */
   async closeOwnedTabs(): Promise<number> {
     const mine = this.pages();
+    const othersLeft = this.context?.pages().some((p) => !mine.includes(p)) ?? true;
+    if (mine.length && !othersLeft) await this.context?.newPage().catch(() => undefined);
     await Promise.all(mine.map((p) => p.close().catch(() => {})));
     return mine.length;
   }
