@@ -8,7 +8,8 @@
 # The registration token comes from GitHub: repository Settings > Actions > Runners > New self-hosted
 # runner (it expires after an hour). With the gh CLI signed in you can leave RUNNER_TOKEN unset and the
 # script fetches one. The 1Password token is asked for interactively (or read from OP_SERVICE_ACCOUNT_TOKEN
-# when set) and never echoed. From a Terminal on the machine it goes into the login keychain; over SSH the
+# when set) and never echoed. The test's vault and item names (BROWSER_MCP_TEST_VAULT, BROWSER_MCP_TEST_ITEMS)
+# are asked for too and written to the runner's .env, so they never appear in the repository. From a Terminal on the machine it goes into the login keychain; over SSH the
 # keychain is locked, so it goes into the runner's private .env file instead (owner-only; the runner
 # exports it to jobs). Node is installed by the workflow itself (setup-node), so only Chrome is required.
 # Nothing here needs sudo.
@@ -42,6 +43,12 @@ else
 fi
 unset OP_TOKEN
 
+say "Test configuration (kept out of the repository)"
+TEST_VAULT="${BROWSER_MCP_TEST_VAULT:-}"; TEST_ITEMS="${BROWSER_MCP_TEST_ITEMS:-}"
+[ -n "$TEST_VAULT" ] || { printf 'Vault holding the test logins: '; read -r TEST_VAULT; }
+[ -n "$TEST_ITEMS" ] || { printf 'Two Login item titles in it, comma-separated: '; read -r TEST_ITEMS; }
+[ -n "$TEST_VAULT" ] && [ -n "$TEST_ITEMS" ] || die "both the vault and the item titles are required"
+
 say "GitHub runner registration token"
 if [ -z "${RUNNER_TOKEN:-}" ]; then
   command -v gh >/dev/null || die "set RUNNER_TOKEN (Settings > Actions > Runners > New self-hosted runner) or install and sign in to gh"
@@ -65,11 +72,12 @@ fi
 say "Registering with github.com/$REPO"
 ./config.sh --unattended --replace --url "https://github.com/$REPO" --token "$RUNNER_TOKEN" \
   --name "$(scutil --get ComputerName | tr -c 'A-Za-z0-9\n' '-')-browser-mcp" --labels "$RUNNER_LABELS" --work _work
-if [ -n "$ENV_TOKEN" ]; then
-  (umask 077; printf 'OP_SERVICE_ACCOUNT_TOKEN=%s\n' "$ENV_TOKEN" > .env); chmod 600 .env
-  unset ENV_TOKEN
-  echo "token written to $RUNNER_DIR/.env (mode 600; the runner exports it to jobs)"
-fi
+(umask 077; {
+  [ -n "$ENV_TOKEN" ] && printf 'OP_SERVICE_ACCOUNT_TOKEN=%s\n' "$ENV_TOKEN"
+  printf 'BROWSER_MCP_TEST_VAULT=%s\nBROWSER_MCP_TEST_ITEMS=%s\n' "$TEST_VAULT" "$TEST_ITEMS"
+} > .env); chmod 600 .env
+unset ENV_TOKEN
+echo "runner environment written to $RUNNER_DIR/.env (mode 600; the runner exports it to jobs)"
 
 say "Installing as a LaunchAgent (starts at login, runs in your session)"
 ./svc.sh install

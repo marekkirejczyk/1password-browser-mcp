@@ -102,8 +102,7 @@ as Logins.
 ### Service account
 
 A service account can only read the **shared vaults** you grant it, never your Personal or Private
-vault, so put the logins the agent may use into a dedicated vault (for example `Agent`) and grant
-`read_items` only. `BROWSER_MCP_OP_VAULTS` narrows the server further to a comma-separated allowlist of
+vault, so put the logins the agent may use into a dedicated vault and grant `read_items` only. `BROWSER_MCP_OP_VAULTS` narrows the server further to a comma-separated allowlist of
 vault titles or ids. The token is a long-lived secret: 1Password prints it once, so keep it in your
 keychain or in 1Password itself, not in a config file. Service accounts also have hourly and daily
 request limits.
@@ -111,7 +110,7 @@ request limits.
 Create one from a CLI that is signed in through the app (one Touch ID prompt):
 
 ```bash
-op service-account create browser-mcp --account my.1password.com --vault "Agent:read_items"
+op service-account create browser-mcp --account my.1password.com --vault "<vault>:read_items"
 ```
 
 Then put the token in the server's environment, e.g. in the MCP client config
@@ -201,13 +200,15 @@ submitted values against the vault, so the test proves the right secrets reached
 ever printing them. It is safe to run repeatedly: stale browsers and temp profiles from an interrupted
 run are reaped at the start, and everything is removed at the end. About 8 s per run.
 
-It needs a service account token with read access to one vault of test logins:
+It needs a service account token with read access to one vault of test logins. The vault and item
+names are deliberately not in the repository; on the CI machine they live in the runner's `.env`
+next to the token:
 
 | variable | default | meaning |
 |---|---|---|
 | `OP_SERVICE_ACCOUNT_TOKEN` | login keychain item `browser-mcp-op-service-account` (macOS) | the token; the keychain fallback keeps it out of shells and CI config |
-| `BROWSER_MCP_TEST_VAULT` | `Agent` | vault holding the test logins; nothing else is read |
-| `BROWSER_MCP_TEST_ITEMS` | `Meetup,Allegro` | two Login items in that vault, one per tab |
+| `BROWSER_MCP_TEST_VAULT` | required | vault holding the test logins; nothing else is read |
+| `BROWSER_MCP_TEST_ITEMS` | required | two Login item titles in that vault, comma-separated, one per tab |
 | `BROWSER_MCP_BROWSER` / `BROWSER_MCP_EXECUTABLE` | `chrome` | browser to launch for the test |
 | `E2E_VERBOSE` | | print every tool call and timing |
 
@@ -220,7 +221,9 @@ run [`scripts/setup-runner.sh`](scripts/setup-runner.sh) there once: it register
 repository, installs the runner as a LaunchAgent in that user's session (which gives jobs a display),
 and puts the token in the login keychain, or, when run over SSH where the keychain is locked, in the
 runner's private `.env` file, which the runner exports to jobs. Both places count as runner-local; the
-keychain is preferable, and the script prints how to move the token there later.
+keychain is preferable, and the script prints how to move the token there later. The test's vault and
+item names always go into that `.env` (pass `BROWSER_MCP_TEST_VAULT` and `BROWSER_MCP_TEST_ITEMS` to
+the script, or answer its prompts).
 
 ## Configuration (environment or `--key=value`)
 

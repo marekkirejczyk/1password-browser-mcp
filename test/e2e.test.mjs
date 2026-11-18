@@ -3,8 +3,8 @@
 //
 // Needs OP_SERVICE_ACCOUNT_TOKEN (or, on macOS, a login-keychain item named by
 // BROWSER_MCP_TEST_KEYCHAIN_SERVICE, default browser-mcp-op-service-account) with read access to
-// the vault BROWSER_MCP_TEST_VAULT (default "Agent") holding the Login items in
-// BROWSER_MCP_TEST_ITEMS (default "Meetup,Allegro"). Nothing outside that vault is read.
+// the vault BROWSER_MCP_TEST_VAULT holding the two Login items named in BROWSER_MCP_TEST_ITEMS
+// (comma-separated). Both variables are required; nothing outside that vault is read.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
@@ -22,8 +22,8 @@ const { resolveBrowser } = await import(path.join(root, 'dist/profile.js'));
 const { findFreePort } = await import(path.join(root, 'dist/sessions.js'));
 
 const TMP_PREFIX = 'browser-mcp-e2e-';
-const VAULT = process.env.BROWSER_MCP_TEST_VAULT || 'Agent';
-const ITEMS = (process.env.BROWSER_MCP_TEST_ITEMS || 'Meetup,Allegro').split(',').map((s) => s.trim()).filter(Boolean);
+const VAULT = process.env.BROWSER_MCP_TEST_VAULT || '';
+const ITEMS = (process.env.BROWSER_MCP_TEST_ITEMS || '').split(',').map((s) => s.trim()).filter(Boolean);
 const KEYCHAIN_SERVICE = process.env.BROWSER_MCP_TEST_KEYCHAIN_SERVICE || 'browser-mcp-op-service-account';
 const mask = (s) => String(s).replace(/ops_[A-Za-z0-9_-]{20,}/g, 'ops_<masked>');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -93,6 +93,8 @@ async function startServer(name, token) {
 }
 
 before(async () => {
+  assert.ok(VAULT, 'set BROWSER_MCP_TEST_VAULT to the vault that holds the test logins');
+  assert.ok(ITEMS.length >= 2, 'set BROWSER_MCP_TEST_ITEMS to two comma-separated Login item titles in that vault');
   if (process.env.E2E_VERBOSE) console.log(`[setup] module loaded at process uptime ${process.uptime().toFixed(1)} s`);
   const t0 = Date.now(); const lap = (l) => { if (process.env.E2E_VERBOSE) console.log(`[setup] ${l} +${Date.now() - t0} ms`); };
   const token = loadToken();
