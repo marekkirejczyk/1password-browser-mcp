@@ -79,17 +79,18 @@ A registry in `~/.browser-mcp/sessions/` numbers live sessions; `browser_status`
 
 ## 1Password
 
-`onepassword_fill` strategies (pick one with `strategy`; `auto` tries `inline` then `popup`):
+`onepassword_fill` strategies (pick one with `strategy`; `auto` tries `inline` then `popup`, or
+`cli` first when a [service account](#service-account-headless-cli) token is set):
 
 | strategy | mechanism | needs |
 |---|---|---|
-| `cli` | `op item get` reads the item and the server types the values into the detected fields; fully programmatic, no extension UI, but the 1Password app asks for Touch ID (or the account password) on every call, so it is never chosen automatically | `op` installed and signed in (enable *Settings > Developer > Integrate with 1Password CLI* in the app, or export `OP_SESSION_*`) |
+| `cli` | `op item get` reads the item and the server types the values into the detected fields; fully programmatic, no extension UI. With the desktop-app integration the 1Password app asks for Touch ID (or the account password) on every call, so it is then never chosen automatically; with a service account token it is headless and becomes the first choice of `auto` | `op` installed, plus either `OP_SERVICE_ACCOUNT_TOKEN` (see below) or the app integration (*Settings > Developer > Integrate with 1Password CLI*, or an exported `OP_SESSION_*`) |
 | `inline` | focuses the login field, waits for the extension's inline menu, picks the first suggestion with ArrowDown + Enter | extension unlocked, a saved Login for the site, inline menu enabled |
 | `popup` | opens the extension popup page in a tab, searches the site or `item`, clicks **Open & Fill** (1Password opens the item's URL and fills it) | extension unlocked |
 | `shortcut` | sends Cmd+Shift+X then Enter through macOS System Events | macOS only; Accessibility permission for the app that runs this server |
 
-`auto` = inline, popup. Use `strategy=cli` explicitly when the extension cannot fill (wallet and
-other extension pages, sites without a saved item). Values are never returned to the caller;
+`auto` = inline, popup (cli, inline, popup with a service account). Use `strategy=cli` explicitly
+when the extension cannot fill (wallet and other extension pages, sites without a saved item). Values are never returned to the caller;
 results only say which fields are filled. `onepassword_otp` fills one-time codes (inline, or CLI
 when asked), `onepassword_items`
 lists matching items (CLI), `onepassword_status` reports what is available.
@@ -97,6 +98,36 @@ lists matching items (CLI), `onepassword_status` reports what is available.
 If the extension is locked, the popup strategy clicks **Unlock** and waits up to 30 s for you to
 approve in the 1Password app (Chrome with app integration) or to type the account password in the
 browser window (Brave without app integration). Unlocking once per browser launch is enough.
+
+### Service account (headless CLI)
+
+A [1Password service account](https://developer.1password.com/docs/service-accounts/) gives `op` a
+token instead of the desktop app, so the `cli` strategy runs with no Touch ID prompt, no unlocked
+extension and no extra tabs: `onepassword_items` answers in about a second and a fill takes one to
+two seconds. The server detects `OP_SERVICE_ACCOUNT_TOKEN` in its environment and then tries `cli`
+first in `auto` (for `onepassword_fill` and `onepassword_otp`), skips `op signin` and the
+`--account` flag, and passes `--vault` on item reads, which service accounts require.
+`onepassword_status` reports `cli auth: service account`.
+
+Limits: a service account can only read **shared vaults** you grant it, never your Personal or
+Private vault, so move or copy the logins the agent may use into a dedicated vault (for example
+`Agent`). Grant `read_items` only. The token is a long-lived secret: 1Password prints it once, so
+store it in your keychain or in 1Password itself, not in a config file. Service accounts also have
+hourly and daily request limits.
+
+Create one from a CLI that is signed in through the app (one Touch ID prompt):
+
+```bash
+op service-account create browser-mcp --account my.1password.com --vault "Agent:read_items"
+```
+
+Then put the token in the server's environment, e.g. in the MCP client config
+(`"env": { "OP_SERVICE_ACCOUNT_TOKEN": "ops_..." }`) or, on macOS, from the login keychain:
+
+```bash
+security add-generic-password -a "$USER" -s browser-mcp-op-service-account -w "ops_..."
+export OP_SERVICE_ACCOUNT_TOKEN="$(security find-generic-password -a "$USER" -s browser-mcp-op-service-account -w)"
+```
 
 ## Skills
 
@@ -168,6 +199,34 @@ Tested on Linux with Google Chrome (headless, and headful under `xvfb-run`). Wha
 - **Snap Chromium** cannot read hidden directories in your home, including `~/.browser-mcp`. Point
   `BROWSER_MCP_MIRROR_DIR` at a visible folder (e.g. `~/browser-mcp-profiles`) or use a non-Snap build.
 
+## Tests and continuous integration
+
+`npm test` builds the server and runs the end-to-end test in `test/`: it starts a headless Chrome on an
+empty temporary profile, attaches **two** server sessions to it, and signs each into its own local
+login fixture in parallel with credentials read from 1Password through the SDK. The fixtures check the
+submitted values against the vault, so the test proves the right secrets reached the right tab without
+ever printing them. It is safe to run repeatedly: stale browsers and temp profiles from an interrupted
+run are reaped at the start, and everything is removed at the end. About 8 s per run.
+
+It needs a service account token with read access to one vault of test logins:
+
+| variable | default | meaning |
+|---|---|---|
+| `OP_SERVICE_ACCOUNT_TOKEN` | login keychain item `browser-mcp-op-service-account` (macOS) | the token; the keychain fallback keeps it out of shells and CI config |
+| `BROWSER_MCP_TEST_VAULT` | `Agent` | vault holding the test logins; nothing else is read |
+| `BROWSER_MCP_TEST_ITEMS` | `Meetup,Allegro` | two Login items in that vault, one per tab |
+| `BROWSER_MCP_BROWSER` / `BROWSER_MCP_EXECUTABLE` | `chrome` | browser to launch for the test |
+| `E2E_VERBOSE` | | print every tool call and timing |
+
+[`.github/workflows/e2e.yml`](.github/workflows/e2e.yml) runs the same command on a **self-hosted macOS
+runner**, so the token never leaves that machine: GitHub stores no secret, the workflow passes none, and
+the job only runs for code from this repository (fork pull requests are skipped, which matters because
+the repository is public). To set up the runner on a Mac that stays logged in, run
+[`scripts/setup-runner.sh`](scripts/setup-runner.sh) there once: it stores the token in the login keychain,
+registers the machine with the repository and installs the runner as a LaunchAgent in that user's session,
+which is what gives jobs an unlocked keychain and a display. The runner captures the PATH of the shell that
+ran the script, so Node 20+ must be on it. Chrome must be installed.
+
 ## Configuration (environment or `--key=value`)
 
 | variable | default | meaning |
@@ -189,6 +248,7 @@ Tested on Linux with Google Chrome (headless, and headful under `xvfb-run`). Wha
 | `BROWSER_MCP_1P_SHORTCUT` | `cmd+shift+x` (macOS) / `ctrl+shift+x` | popup shortcut used by `strategy=shortcut` (macOS only) |
 | `BROWSER_MCP_1P_EXTENSION_ID` | `aeblfdkhhhdcdjpifhhbdiojplfjncoa` | 1Password extension id |
 | `BROWSER_MCP_OP_PATH` / `BROWSER_MCP_OP_ACCOUNT` | `op` / none | 1Password CLI binary; account to pin (default: every account `op account list` knows is searched, each may prompt once) |
+| `OP_SERVICE_ACCOUNT_TOKEN` | none | 1Password service account token (read by `op` itself): headless `cli` strategy, tried first in `auto`; shared vaults only. See [Service account](#service-account-headless-cli) |
 | `BROWSER_MCP_SESSIONS` | `shared` | `shared` (one browser, per-session tabs) or `isolated` (one browser per server) |
 | `BROWSER_MCP_SESSION_NAME` | number from the registry | label used in the tab-group title and the isolated profile copy |
 | `BROWSER_MCP_KEEP_TABS` | `false` | shared: leave this session's tabs open when the server exits |

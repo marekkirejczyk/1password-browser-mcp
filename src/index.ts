@@ -7,7 +7,8 @@ import { SessionRegistry } from './sessions.js';
 import { Logger } from './log.js';
 import { BrowserManager } from './browser.js';
 import { registerBrowserTools } from './tools.js';
-import { registerOnePasswordTools, OpClient } from './onepassword.js';
+import { registerOnePasswordTools } from './onepassword.js';
+import { VaultClient } from './vault.js';
 import { resolveBrowser, listProfiles, hasExtension, isBrowserRunning } from './profile.js';
 import { isLinux, isRoot, inContainer, hasDisplay, needsNoSandbox } from './platform.js';
 
@@ -49,11 +50,7 @@ async function doctor(launch: boolean): Promise<void> {
   } catch (e) {
     out(`browser: ${(e as Error).message}`);
   }
-  const op = new OpClient(cfg.opPath, cfg.opAccount);
-  out(`1Password CLI (${cfg.opPath}): ${(await op.available()) ? 'installed' : 'not found'}`);
-  if (await op.available()) {
-    try { await op.run(['whoami'], 30000); out('  signed in: yes'); } catch (e) { out(`  signed in: no - ${(e as Error).message.split('\n')[0]}`); }
-  }
+  out(`1Password ${await new VaultClient(cfg, version).status()}`);
   if (process.platform === 'darwin') {
     try { const { frontmostProcessName } = await import('./mac.js'); out(`accessibility: ok (frontmost app: ${await frontmostProcessName()})`); }
     catch (e) { out(`accessibility: ${(e as Error).message}`); }
@@ -85,12 +82,14 @@ async function main(): Promise<void> {
     instructions: [
       'Drives the user\'s own Chrome/Brave profile (cookies, sessions, extensions) through the DevTools protocol.',
       'Workflow: browser_navigate or browser_snapshot to get element refs like e12, then browser_click / browser_type / browser_fill_form with ref.',
-      'Logins: on a sign-in page call onepassword_fill (extension autofill; strategy=cli for a programmatic fill, which prompts for Touch ID each time); for 2FA codes call onepassword_otp. Secrets never come back to you.',
+      cfg.opToken
+        ? 'Logins: on a sign-in page call onepassword_fill (auto = programmatic fill through the 1Password SDK and service account, then extension autofill); for 2FA codes call onepassword_otp. Secrets never come back to you.'
+        : 'Logins: on a sign-in page call onepassword_fill (extension autofill; set OP_SERVICE_ACCOUNT_TOKEN for the programmatic sdk strategy); for 2FA codes call onepassword_otp. Secrets never come back to you.',
       'Prefer browser_snapshot / browser_get_text over screenshots for reading pages.',
     ].join('\n'),
   });
   registerBrowserTools(server, mgr, cfg);
-  registerOnePasswordTools(server, mgr, cfg, log);
+  registerOnePasswordTools(server, mgr, cfg, log, version);
   await server.connect(new StdioServerTransport());
   log.log(`1password-browser-mcp ${version} started (mode=${cfg.mode}, browser=${cfg.browser}, cdp=${cfg.cdpUrl})`);
 }

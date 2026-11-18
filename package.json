@@ -6,7 +6,9 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
-    "dev": "tsc -p tsconfig.json --watch"
+    "dev": "tsc -p tsconfig.json --watch",
+    "test": "npm run build && node --test \"test/*.test.mjs\"",
+    "test:e2e": "node --test \"test/*.test.mjs\""
   },
   "keywords": [
     "mcp",
@@ -24,6 +26,7 @@
     "1password-browser-mcp": "dist/index.js"
   },
   "dependencies": {
+    "@1password/sdk": "^0.5.0",
     "@modelcontextprotocol/sdk": "^1.32.2",
     "playwright-core": "^1.65.0",
     "zod": "^4.6.7"

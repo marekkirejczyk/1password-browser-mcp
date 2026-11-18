@@ -1,4 +1,3 @@
-import { execFile } from 'node:child_process';
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { Page, ElementHandle } from 'playwright-core';
@@ -7,6 +6,7 @@ import type { BrowserManager } from './browser.js';
 import type { Logger } from './log.js';
 import { activateProcess, sendShortcut } from './mac.js';
 import { guard, text, resolve } from './tools.js';
+import { VaultClient, hostOf, type LoginItem } from './vault.js';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -246,146 +246,23 @@ async function fillViaShortcut(page: Page, fields: LoginFields, mgr: BrowserMana
   return { ok, detail: `shortcut ${cfg.onePasswordShortcut}+Enter: ${ok ? 'filled' : 'nothing filled (1Password locked, or no suggestion for this site)'} (${after.text})` };
 }
 
-/* ---------------------------------- op CLI ---------------------------------- */
-
-interface OpItem { id: string; title: string; vault?: { name?: string }; urls?: Array<{ href: string; primary?: boolean }>; additional_information?: string; account?: string }
-interface OpAccount { url: string; email?: string; account_uuid: string }
-
-class NotSignedIn extends Error {}
-
-export class OpClient {
-  private cache?: { time: number; items: OpItem[] };
-  constructor(private opPath: string, private account?: string) {}
-
-  /** Runs `op`; `account` scopes the call (item ids are only unique within an account). */
-  async run(args: string[], timeoutMs = 90000, account?: string): Promise<string> {
-    try {
-      return await this.exec(args, timeoutMs, account);
-    } catch (e) {
-      if (!(e instanceof NotSignedIn) || args[0] === 'signin') throw e;
-      // The app-integration session lapsed (app locked, restarted or updated). `op signin` makes the
-      // 1Password app ask for Touch ID; then the original call is retried once.
-      const acct = account ?? this.account;
-      try {
-        await this.exec(['signin'], 120000, acct);
-      } catch (se) {
-        throw new Error(`1Password CLI is not signed in and signing in through the app failed: ${(se as Error).message.split('\n')[0]}\nEnable "Integrate with 1Password CLI" in the 1Password app (Settings > Developer) and unlock it, or run "eval $(op signin)" and pass the OP_SESSION_* variable to this server's environment.`);
-      }
-      return this.exec(args, timeoutMs, account);
-    }
-  }
-
-  private exec(args: string[], timeoutMs: number, account?: string): Promise<string> {
-    const acct = account ?? this.account;
-    const full = [...args, ...(acct ? ['--account', acct] : [])];
-    return new Promise((resolve, reject) => {
-      execFile(this.opPath, full, { timeout: timeoutMs, maxBuffer: 50 * 1024 * 1024, env: { ...process.env, OP_FORMAT: 'json' } }, (err, stdout, stderr) => {
-        if (err) {
-          const msg = (stderr || err.message).trim();
-          if (/not signed in|no account|sign in|authorization/i.test(msg)) {
-            return reject(new NotSignedIn(`1Password CLI is not signed in: ${msg}`));
-          }
-          if (/ENOENT/.test(msg)) {
-            const hint = process.platform === 'darwin' ? 'brew install 1password-cli' : 'install it from https://developer.1password.com/docs/cli/get-started/';
-            return reject(new Error(`1Password CLI not found at "${this.opPath}" (${hint}, or set BROWSER_MCP_OP_PATH).`));
-          }
-          return reject(new Error(`op ${args.slice(0, 3).join(' ')} failed: ${msg}`));
-        }
-        resolve(stdout);
-      });
-    });
-  }
-
-  async available(): Promise<boolean> {
-    try { await this.exec(['--version'], 5000, ''); return true; } catch { return false; }
-  }
-
-  async accounts(): Promise<OpAccount[]> {
-    if (this.account) return [{ url: this.account, account_uuid: this.account }];
-    try {
-      const list = JSON.parse(await this.run(['account', 'list', '--format', 'json'], 15000)) as OpAccount[];
-      if (list.length) return list;
-    } catch { /* fall through: let op pick its default */ }
-    return [{ url: '', account_uuid: '' }];
-  }
-
-  /** Login, Password and Crypto Wallet items across every account the CLI knows (unless BROWSER_MCP_OP_ACCOUNT pins one). */
-  async listLogins(): Promise<OpItem[]> {
-    if (this.cache && Date.now() - this.cache.time < 5 * 60 * 1000) return this.cache.items;
-    const items: OpItem[] = [];
-    const errors: string[] = [];
-    for (const a of await this.accounts()) {
-      try {
-        const out = await this.run(['item', 'list', '--categories', 'Login,Password,Crypto Wallet', '--format', 'json'], 90000, a.account_uuid || undefined);
-        for (const it of JSON.parse(out) as OpItem[]) items.push({ ...it, account: a.account_uuid || undefined });
-      } catch (e) {
-        errors.push(`${a.url || 'default account'}: ${(e as Error).message.split('\n')[0]}`);
-      }
-    }
-    if (!items.length && errors.length) throw new Error(errors.join('; '));
-    this.cache = { time: Date.now(), items };
-    return items;
-  }
-
-  invalidate(): void { this.cache = undefined; }
-
-  async candidates(host: string, hint?: string): Promise<OpItem[]> {
-    const items = await this.listLogins();
-    const h = normHost(host);
-    if (!h) {
-      if (!hint) return [];
-      const q = hint.toLowerCase();
-      return items.filter((it) => it.id === hint || it.title.toLowerCase().includes(q) || (it.additional_information ?? '').toLowerCase().includes(q));
-    }
-    const scored = items.map((it) => {
-      let score = 0;
-      for (const u of it.urls ?? []) {
-        const ih = normHost(hostOf(u.href));
-        if (!ih) continue;
-        if (ih === h) score = Math.max(score, 3);
-        else if (h.endsWith('.' + ih) || ih.endsWith('.' + h)) score = Math.max(score, 2);
-      }
-      if (hint) {
-        const q = hint.toLowerCase();
-        if (it.id === hint) score += 10;
-        else if (it.title.toLowerCase().includes(q) || (it.additional_information ?? '').toLowerCase().includes(q)) score += 1;
-      }
-      return { it, score };
-    }).filter((s) => s.score > 0).sort((a, b) => b.score - a.score);
-    return scored.map((s) => s.it);
-  }
-
-  async getLogin(item: OpItem): Promise<{ username?: string; password?: string }> {
-    const out = await this.run(['item', 'get', item.id, '--format', 'json', '--reveal'], 90000, item.account);
-    const parsed = JSON.parse(out) as { fields?: Array<{ purpose?: string; label?: string; value?: string; type?: string }> };
-    const fields = parsed.fields ?? [];
-    const byPurpose = (p: string) => fields.find((f) => f.purpose === p)?.value;
-    return {
-      username: byPurpose('USERNAME') ?? fields.find((f) => /user|email|login/i.test(f.label ?? '') && f.type === 'STRING')?.value,
-      // Password and Crypto Wallet items keep the secret in a concealed field (e.g. "password", "wallet password").
-      password: byPurpose('PASSWORD') ?? fields.find((f) => f.type === 'CONCEALED' && /password|passphrase|pin/i.test(f.label ?? ''))?.value ?? fields.find((f) => f.type === 'CONCEALED')?.value,
-    };
-  }
-
-  async getOtp(item: OpItem): Promise<string> {
-    return (await this.run(['item', 'get', item.id, '--otp'], 90000, item.account)).trim();
-  }
+/**
+ * Presses Enter in a field and waits for the navigation it usually triggers. Sign-ins that stay on the
+ * page (fetch-based) just time out quietly, so the reported URL is where the page ended up either way.
+ */
+async function submitWith(page: Page, field: Field): Promise<void> {
+  const nav = page.waitForEvent('framenavigated', { predicate: (f) => f === page.mainFrame(), timeout: 3000 }).catch(() => undefined);
+  await field.press('Enter');
+  await nav;
+  await page.waitForLoadState('domcontentloaded').catch(() => {});
 }
-
-/** Hostname of an http(s) URL; empty for extension and browser UI pages, which have no site to match. */
-function hostOf(url: string): string {
-  try {
-    const u = new URL(url.includes('://') ? url : `https://${url}`);
-    return /^https?:$/.test(u.protocol) ? u.hostname : '';
-  } catch { return ''; }
-}
-function normHost(h: string): string { return h.toLowerCase().replace(/^www\./, ''); }
 
 /* ----------------------------------- tools ---------------------------------- */
 
-export function registerOnePasswordTools(server: McpServer, mgr: BrowserManager, cfg: Config, logger: Logger): void {
+export function registerOnePasswordTools(server: McpServer, mgr: BrowserManager, cfg: Config, logger: Logger, version: string): void {
   log = logger;
-  const op = new OpClient(cfg.opPath, cfg.opAccount);
+  const op = new VaultClient(cfg, version);
+  const sdk = op.configured;
 
   const fieldsFromArgs = async (page: Page, a: { usernameRef?: string; passwordRef?: string; otpRef?: string }): Promise<LoginFields> => {
     const auto = await detectFields(page);
@@ -399,41 +276,50 @@ export function registerOnePasswordTools(server: McpServer, mgr: BrowserManager,
 
   const describeFields = (f: LoginFields) => `fields detected: username=${f.username ? 'yes' : 'no'}, password=${f.password ? 'yes' : 'no'}, otp=${f.otp ? 'yes' : 'no'}`;
 
-  const cliFill = async (page: Page, fields: LoginFields, item: string | undefined, what: 'login' | 'otp'): Promise<string> => {
+  /** Programmatic fill: the SDK reads the item (service account, no prompt) and the server types the values. */
+  const sdkFill = async (page: Page, fields: LoginFields, item: string | undefined, what: 'login' | 'otp', dry = false): Promise<string> => {
     const host = hostOf(page.url());
-    let chosen: OpItem | undefined;
+    let chosen: LoginItem | undefined;
     const cands = await op.candidates(host, item);
     if (item) {
       // An explicit item must match by id or title; never fall back to a different item for the site.
       const q = item.toLowerCase();
-      const matches = (i: OpItem) => i.id === item || i.title.toLowerCase() === q || i.title.toLowerCase().includes(q);
+      const matches = (i: LoginItem) => i.id === item || i.title.toLowerCase() === q || i.title.toLowerCase().includes(q);
       chosen = cands.find(matches) ?? (await op.listLogins()).find(matches);
     } else {
       chosen = cands[0];
     }
     if (!chosen) throw new Error(`No 1Password Login item matches ${item ? `"${item}"` : host || 'this page (not a website: pass item=<title>)'}. Use onepassword_items to list candidates and pass item=<id or title>.`);
     if (cands.length > 1 && !item) logger.log(`multiple 1Password items match ${host}; using "${chosen.title}" (${cands.length} candidates)`);
-    const notes: string[] = [`cli: using item "${chosen.title}"${chosen.additional_information ? ` (${chosen.additional_information})` : ''} from vault ${chosen.vault?.name ?? '?'}${cands.length > 1 ? `; ${cands.length} items match this site` : ''}`];
+    const notes: string[] = [`sdk: ${dry ? 'would use' : 'using'} item "${chosen.title}" from vault ${chosen.vaultTitle}${cands.length > 1 ? `; ${cands.length} items match this site` : ''}`];
+    if (dry) {
+      // Dry run: resolve the item but read no secret.
+      const would = what === 'otp' ? (fields.otp ? 'otp' : 'nothing (no one-time-code field detected)') : [fields.username && 'username', fields.password && 'password'].filter(Boolean).join(' and ') || 'nothing (no username/password field detected)';
+      notes.push(`sdk: dry run, would fill ${would}`);
+      return notes.join('\n');
+    }
     if (what === 'otp') {
       if (!fields.otp) throw new Error('No one-time-code field detected; pass otpRef.');
       const code = await op.getOtp(chosen);
       if (!code) throw new Error(`Item "${chosen.title}" has no one-time password.`);
       await fields.otp.fill(code);
-      notes.push('cli: filled otp');
+      notes.push('sdk: filled otp');
       return notes.join('\n');
     }
     const creds = await op.getLogin(chosen);
-    if (fields.username && creds.username) { await fields.username.fill(creds.username); notes.push('cli: filled username'); }
-    if (fields.password && creds.password) { await fields.password.fill(creds.password); notes.push('cli: filled password'); }
+    if (fields.username && creds.username) { await fields.username.fill(creds.username); notes.push('sdk: filled username'); }
+    if (fields.password && creds.password) { await fields.password.fill(creds.password); notes.push('sdk: filled password'); }
     if (!fields.username && !fields.password) throw new Error('No username/password field detected on this page; pass usernameRef/passwordRef.');
     return notes.join('\n');
   };
 
+  const sdkHint = sdk ? '' : ' (strategy=sdk needs OP_SERVICE_ACCOUNT_TOKEN)';
+
   server.registerTool('onepassword_fill', {
     title: '1Password: fill login',
-    description: 'Fill the login form on the active tab from 1Password. Strategies: cli (1Password CLI reads the item, the server types the values; fully programmatic), inline (extension inline menu on the focused field), popup (extension popup page: search item, Open & Fill), shortcut (macOS keystrokes, needs Accessibility). auto = inline, popup (extension only; the cli strategy triggers a Touch ID / unlock prompt on every call, so it is used only when requested explicitly). Credential values are never returned. For multi-step forms (username first) call it again on the next step.',
+    description: `Fill the login form on the active tab from 1Password. Strategies: sdk (the 1Password SDK reads the item with a service account token and the server types the values; fully programmatic, no prompt), inline (extension inline menu on the focused field), popup (extension popup page: search item, Open & Fill), shortcut (macOS keystrokes, needs Accessibility). ${sdk ? 'auto = sdk, inline, popup.' : 'auto = inline, popup (no service account token is set, so sdk is unavailable).'} Credential values are never returned. For multi-step forms (username first) call it again on the next step.`,
     inputSchema: {
-      strategy: z.enum(['auto', 'extension', 'inline', 'popup', 'cli', 'shortcut']).optional().describe('auto = extension = inline -> popup; cli must be requested explicitly (prompts for Touch ID each time)'),
+      strategy: z.enum(['auto', 'extension', 'inline', 'popup', 'sdk', 'shortcut']).optional().describe(sdk ? 'auto = sdk -> inline -> popup; extension = inline -> popup' : 'auto = extension = inline -> popup' + sdkHint),
       item: z.string().optional().describe('1Password item title/id to prefer when several match the site'),
       submit: z.boolean().optional().describe('Press Enter in the last filled field afterwards'),
       dryRun: z.boolean().optional().describe('Stop right before the fill step and report what would happen'),
@@ -444,18 +330,19 @@ export function registerOnePasswordTools(server: McpServer, mgr: BrowserManager,
     const fields = await fieldsFromArgs(page, { usernameRef, passwordRef, otpRef });
     const notes: string[] = [describeFields(fields)];
     const strat = strategy ?? 'auto';
-    const order: Array<'inline' | 'popup' | 'cli' | 'shortcut'> = strat === 'auto' || strat === 'extension' ? ['inline', 'popup'] : [strat];
+    const order: Array<'inline' | 'popup' | 'sdk' | 'shortcut'> = strat === 'auto' && sdk ? ['sdk', 'inline', 'popup'] : strat === 'auto' || strat === 'extension' ? ['inline', 'popup'] : [strat];
     const dry = dryRun ?? false;
     let done = false;
     for (const s of order) {
       if (done) break;
-      if (s === 'cli') {
-        if (dry) { notes.push('cli: skipped in dry run'); continue; }
-        try { notes.push(await cliFill(page, fields, item, 'login')); done = true; }
-        catch (e) { notes.push(`cli: ${(e as Error).message}`); }
+      if (s === 'sdk') {
+        // A dry run resolves the item without reading secrets and counts as handled, so it does not fall
+        // through to the extension strategies (which may wait for an unlock).
+        try { notes.push(await sdkFill(page, fields, item, 'login', dry)); done = true; }
+        catch (e) { notes.push(`sdk: ${(e as Error).message}`); }
         continue;
       }
-      if (s === 'shortcut' && process.platform !== 'darwin') { notes.push('shortcut: only supported on macOS (uses System Events); use cli, inline or popup'); continue; }
+      if (s === 'shortcut' && process.platform !== 'darwin') { notes.push('shortcut: only supported on macOS (uses System Events); use sdk, inline or popup'); continue; }
       if (!mgr.onePasswordInstalled()) { notes.push(`${s}: 1Password extension not found in this profile`); continue; }
       const r = s === 'inline' ? await fillViaInlineMenu(page, fields, logger, dry)
         : s === 'popup' ? await fillViaPopup(page, fields, mgr, cfg, logger, item, dry)
@@ -469,18 +356,18 @@ export function registerOnePasswordTools(server: McpServer, mgr: BrowserManager,
     if (done && submit && !dry) {
       const f = active === page ? fields : await detectFields(active);
       const last = f.password ?? f.username ?? f.otp;
-      if (last) { await last.press('Enter'); await active.waitForLoadState('domcontentloaded').catch(() => {}); notes.push(`submitted; now at ${active.url()}`); }
+      if (last) { await submitWith(active, last); notes.push(`submitted; now at ${active.url()}`); }
     }
-    if (!done && !order.includes('cli') && !dry) notes.push('hint: strategy=cli fills programmatically through the 1Password CLI (prompts for Touch ID / unlock each time)');
+    if (!done && !order.includes('sdk') && !dry) notes.push(`hint: strategy=sdk fills programmatically through the 1Password SDK${sdkHint}`);
     return done ? text(notes.join('\n')) : { content: [{ type: 'text', text: notes.join('\n') }], isError: true };
   }));
 
   server.registerTool('onepassword_otp', {
     title: '1Password: fill one-time code',
-    description: 'Fill a TOTP / one-time code field from the matching 1Password item (extension inline menu; strategy=cli uses the 1Password CLI, which prompts for Touch ID each time). The code is never returned to the caller.',
+    description: `Fill a TOTP / one-time code field from the matching 1Password item (${sdk ? 'auto = sdk via the service account, then the extension inline menu' : 'extension inline menu; strategy=sdk needs OP_SERVICE_ACCOUNT_TOKEN'}). The code is never returned to the caller.`,
     inputSchema: {
-      strategy: z.enum(['auto', 'inline', 'cli']).optional(),
-      item: z.string().optional().describe('1Password item id or title (CLI)'),
+      strategy: z.enum(['auto', 'inline', 'sdk']).optional(),
+      item: z.string().optional().describe('1Password item id or title (sdk)'),
       otpRef: z.string().optional().describe('Ref of the code field if auto-detection fails'),
       submit: z.boolean().optional(),
     },
@@ -490,7 +377,7 @@ export function registerOnePasswordTools(server: McpServer, mgr: BrowserManager,
     const otp = otpRef ? ((await resolve(page, { ref: otpRef }).elementHandle()) as Field | null) ?? undefined : auto.otp;
     const fields: LoginFields = { otp };
     const notes: string[] = [`otp field: ${otp ? 'detected' : 'not found'}`];
-    const order: Array<'inline' | 'cli'> = (strategy ?? 'auto') === 'auto' ? ['inline'] : [strategy as 'inline' | 'cli'];
+    const order: Array<'inline' | 'sdk'> = (strategy ?? 'auto') === 'auto' ? (sdk ? ['sdk', 'inline'] : ['inline']) : [strategy as 'inline' | 'sdk'];
     let done = false;
     for (const s of order) {
       if (done) break;
@@ -499,46 +386,37 @@ export function registerOnePasswordTools(server: McpServer, mgr: BrowserManager,
         const r = await fillViaInlineMenu(page, fields, logger, false);
         notes.push(r.detail); done = r.ok;
       } else {
-        try { notes.push(await cliFill(page, fields, item, 'otp')); done = true; } catch (e) { notes.push(`cli: ${(e as Error).message}`); }
+        try { notes.push(await sdkFill(page, fields, item, 'otp')); done = true; } catch (e) { notes.push(`sdk: ${(e as Error).message}`); }
       }
     }
-    if (!done && !order.includes('cli')) notes.push('hint: strategy=cli reads the code through the 1Password CLI (prompts for Touch ID / unlock each time)');
-    if (done && submit && otp) { await otp.press('Enter'); await page.waitForLoadState('domcontentloaded').catch(() => {}); notes.push(`submitted; now at ${page.url()}`); }
+    if (!done && !order.includes('sdk')) notes.push(`hint: strategy=sdk reads the code through the 1Password SDK${sdkHint}`);
+    if (done && submit && otp) { await submitWith(page, otp); notes.push(`submitted; now at ${page.url()}`); }
     return done ? text(notes.join('\n')) : { content: [{ type: 'text', text: notes.join('\n') }], isError: true };
   }));
 
   server.registerTool('onepassword_items', {
     title: '1Password: list matching items',
-    description: 'List 1Password Login, Password and Crypto Wallet items matching the active tab\'s site (or a given host/query) via the 1Password CLI: title, username, vault, id. No secrets are returned.',
-    inputSchema: { host: z.string().optional(), query: z.string().optional().describe('Title/username substring'), refresh: z.boolean().optional() },
+    description: 'List 1Password Login, Password and Crypto Wallet items matching the active tab\'s site (or a given host/query) through the 1Password SDK: title, vault, id, websites. No secrets are returned.',
+    inputSchema: { host: z.string().optional(), query: z.string().optional().describe('Title substring'), refresh: z.boolean().optional() },
   }, guard(async ({ host, query, refresh }) => {
     if (refresh) op.invalidate();
     const h = host ?? hostOf((await mgr.page()).url());
-    const items = h ? await op.candidates(h, query) : (await op.listLogins()).filter((i) => !query || i.title.toLowerCase().includes(query.toLowerCase()) || (i.additional_information ?? '').toLowerCase().includes(query.toLowerCase()));
+    const items = h ? await op.candidates(h, query) : (await op.listLogins()).filter((i) => !query || i.title.toLowerCase().includes(query.toLowerCase()));
     if (!items.length) return text(`No 1Password Login items match ${h ? `${h}${query ? ` / "${query}"` : ''}` : `"${query ?? ''}"`}`);
-    return text(items.slice(0, 25).map((i) => `${i.title}  (${i.additional_information ?? 'no username'})  vault=${i.vault?.name ?? '?'}  id=${i.id}${i.account ? `  account=${i.account}` : ''}`).join('\n'));
+    return text(items.slice(0, 25).map((i) => `${i.title}  vault=${i.vaultTitle}  id=${i.id}${i.urls.length ? `  urls=${i.urls.join(',')}` : ''}`).join('\n'));
   }));
 
   server.registerTool('onepassword_status', {
     title: '1Password: status',
-    description: 'Check 1Password integration: extension present in the driven profile, CLI availability and sign-in state, autofill shortcut, Accessibility permission for the shortcut strategy.',
+    description: 'Check 1Password integration: SDK / service account state and readable vaults, extension present in the driven profile, autofill shortcut, Accessibility permission for the shortcut strategy.',
     inputSchema: {},
   }, guard(async () => {
     const lines: string[] = [];
+    lines.push(await op.status());
     lines.push(`extension (${cfg.onePasswordExtensionId}) in profile: ${mgr.onePasswordInstalled() ? 'yes' : 'no'}`);
     lines.push(process.platform === 'darwin'
       ? `popup shortcut used by strategy=shortcut: ${cfg.onePasswordShortcut} (verify at chrome://extensions/shortcuts; override with BROWSER_MCP_1P_SHORTCUT)`
-      : `strategy=shortcut: macOS only (not available on ${process.platform}); cli, inline and popup work here`);
-    const avail = await op.available();
-    lines.push(`cli (${cfg.opPath}): ${avail ? 'installed' : 'not found'}`);
-    if (avail) {
-      try {
-        const accts = await op.accounts();
-        const ok: string[] = [];
-        for (const a of accts) { try { await op.run(['whoami'], 60000, a.account_uuid || undefined); ok.push(a.url || 'default'); } catch (e) { lines.push(`cli account ${a.url}: ${(e as Error).message.split('\n')[0]}`); } }
-        lines.push(`cli accounts searched: ${ok.join(', ') || 'none'}`);
-      } catch (e) { lines.push(`cli sign-in: ${(e as Error).message}`); }
-    }
+      : `strategy=shortcut: macOS only (not available on ${process.platform}); sdk, inline and popup work here`);
     if (mgr.onePasswordInstalled()) {
       try {
         const ctx = await mgr.ensure();

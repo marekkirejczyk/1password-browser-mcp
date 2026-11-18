@@ -34,7 +34,8 @@ Pick the wallet from the item title (contains "metamask" or "rabby") unless the 
 2. `browser_navigate url=<unlock page> snapshot=true`. If the snapshot shows the wallet is already
    unlocked (accounts, balances, no password box), skip to step 5.
 3. `onepassword_fill strategy=cli item="<title>" submit=true`. On wallet pages only the CLI
-   strategy works (the 1Password extension does not run inside other extensions' pages). If the
+   strategy works (the 1Password extension does not run inside other extensions' pages). With a
+   service account token the call is silent; otherwise the 1Password app asks for Touch ID. If the
    result says `password: empty`, report the error text verbatim and stop.
 4. `browser_snapshot` and confirm the unlock succeeded (no "Unlock" button, account visible).
    If a wrong-password message appears, stop; do not retry with other items.
