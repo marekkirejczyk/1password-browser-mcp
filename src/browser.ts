@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { chromium, type Browser, type BrowserContext, type Page, type Dialog, type Worker } from 'playwright-core';
 import type { Config } from './config.js';
 import type { Logger } from './log.js';
-import { resolveBrowser, syncProfile, hasExtension, type BrowserInfo, type SyncResult } from './profile.js';
+import { resolveBrowser, syncProfile, type BrowserInfo, type SyncResult } from './profile.js';
 import { frontmostProcessPid, activateProcess } from './mac.js';
 import { isLinux, isMac, hasDisplay, needsNoSandbox, inContainer, listeningPid as findListeningPid } from './platform.js';
 import { SessionRegistry, tryLaunchLock, findFreePort, type SessionRecord } from './sessions.js';
@@ -581,11 +581,6 @@ export class BrowserManager {
     } finally {
       this.registry.release();
     }
-  }
-
-  onePasswordInstalled(): boolean {
-    const dir = this.info.userDataDirInUse ?? this.info.browser?.userDataDir ?? this.safeResolve()?.userDataDir;
-    return !!dir && hasExtension(dir, this.cfg.profileDir, this.cfg.onePasswordExtensionId);
   }
 }
 

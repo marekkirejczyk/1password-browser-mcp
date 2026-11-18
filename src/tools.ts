@@ -59,7 +59,7 @@ export function registerBrowserTools(server: McpServer, mgr: BrowserManager, cfg
 
   server.registerTool('browser_status', {
     title: 'Browser status',
-    description: 'Report which browser/profile this server drives, whether it is connected, open tabs, and 1Password availability. Connects (launching the browser if needed) when connect=true.',
+    description: 'Report which browser/profile this server drives, whether it is connected, and open tabs (onepassword_status covers 1Password). Connects (launching the browser if needed) when connect=true.',
     inputSchema: { connect: z.boolean().optional().describe('Connect/launch now (default true)') },
   }, guard(async ({ connect }) => {
     const lines: string[] = [];
@@ -73,7 +73,6 @@ export function registerBrowserTools(server: McpServer, mgr: BrowserManager, cfg
     lines.push(`user-data-dir in use: ${mgr.info.userDataDirInUse ?? (cfg.mode === 'attach' ? 'external' : '?')}`);
     lines.push(`cdp: ${cfg.cdpUrl} (${mgr.isConnected() ? 'connected' : 'not connected'}, launched by this server: ${mgr.info.launched}, pid: ${mgr.info.pid ?? '?'})`);
     if (mgr.info.lastSync) lines.push(`last profile sync: ${mgr.info.lastSync.files} files, ${(mgr.info.lastSync.bytes / 1e6).toFixed(1)} MB, ${mgr.info.lastSync.durationMs} ms, skipped large IndexedDB origins: ${mgr.info.lastSync.skippedIndexedDb.length}`);
-    lines.push(`1Password extension in profile: ${mgr.onePasswordInstalled() ? 'yes' : 'no'}; popup shortcut: ${cfg.onePasswordShortcut}`);
     if (mgr.isConnected()) {
       if (mgr.pages().length) await mgr.ensureTabGroup();
       lines.push(`tab group: ${cfg.tabGroup ? `"${mgr.groupTitle}" (${mgr.groupColor}) ${mgr.tabGroupStatus}` : 'disabled'}`);

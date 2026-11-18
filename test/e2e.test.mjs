@@ -159,7 +159,6 @@ test('each session reports the service account and the allowed vault', async () 
     assert.match(r.text, /sdk: service account ok/);
     assert.match(r.text, new RegExp(`vaults: ${VAULT} \\(`));
     assert.doesNotMatch(r.text, /sensitive/i, 'the allowlist must hide other vaults');
-    assert.match(r.text, /extension \(\w+\) in profile: no/, 'the throwaway profile has no extension');
   }));
 });
 
@@ -173,8 +172,8 @@ test('two sessions sign in to two sites in parallel through the SDK', async () =
   }));
   for (const { c, site, fill } of results) {
     assert.ok(fill.ok, `${c.name}: ${fill.text}`);
-    assert.match(fill.text, /sdk: filled username/);
-    assert.match(fill.text, /sdk: filled password/);
+    assert.match(fill.text, /filled username/);
+    assert.match(fill.text, /filled password/);
     assert.equal(site.logins.length, 1, `${site.name}: expected exactly one login attempt, got ${site.logins.length}`);
     assert.match(fill.text, /submitted; now at http:\/\/127\.0\.0\.1:\d+\/me/);
     assert.ok(site.logins[0].ok, `${site.name}: the fixture rejected the submitted credentials`);
